@@ -37,18 +37,25 @@ def _gate():
         st.stop()
     if st.session_state.get("authed"):
         return
-    ui.login_header()
-    _, middle, _ = st.columns([1, 1.2, 1])
-    with middle:
-        # A plain text box, masked with dots by CSS (ui.py), so browser password managers neither fill in a
-        # saved password nor offer to create one; they only act on type="password" fields.
-        entered = st.text_input("Password", autocomplete="off", key="access_code")
-    if entered and hmac.compare_digest(entered.encode(), expected.encode()):
-        st.session_state["authed"] = True
-        st.rerun()
-    elif entered:
-        with middle:
-            st.error("Incorrect password.")
+    ui.login_styles()
+    left, right = st.columns([1.15, 1], gap="large", vertical_alignment="center")
+    with left:
+        ui.login_panel()
+    with right:
+        with st.container(key="login_card"):
+            ui.login_card_head()
+            with st.form("login", border=False):
+                # A plain text box, masked with dots by CSS (ui.py), so browser password managers neither fill
+                # in a saved password nor offer to create one; they only act on type="password" fields.
+                entered = st.text_input("Password", autocomplete="off", key="access_code",
+                                        placeholder="Team password")
+                submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
+            if submitted and entered and hmac.compare_digest(entered.encode(), expected.encode()):
+                st.session_state["authed"] = True
+                st.rerun()
+            elif submitted:
+                st.error("Incorrect password." if entered else "Please enter the password.")
+            ui.login_card_help()
     ui.footer()
     st.stop()
 

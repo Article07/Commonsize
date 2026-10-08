@@ -115,11 +115,81 @@ def cards(items):
     st.markdown(f'<div class="ac-cards">{body}</div>', unsafe_allow_html=True)
 
 
-def login_header():
+_LOGIN_CSS = f"""
+<style>
+.stApp {{ background: radial-gradient(1200px 600px at 85% -10%, #FEE2E2 0%, rgba(254,226,226,0) 60%),
+                       linear-gradient(180deg, #F8FAFC 0%, #EEF2F7 100%); }}
+.block-container {{ max-width: 1100px; padding-top: 7vh !important; }}
+
+.ac-lp {{ position: relative; overflow: hidden; background: {NAVY}; color: #fff; border-radius: 14px;
+          padding: 48px 44px; min-height: 460px; border-left: 6px solid {RED};
+          box-shadow: 0 24px 48px -24px rgba(15, 23, 42, .55); }}
+.ac-lp::before {{ content: ""; position: absolute; width: 340px; height: 340px; right: -120px; top: -140px;
+                  border-radius: 50%; background: radial-gradient(circle, rgba(239,68,68,.35), rgba(239,68,68,0) 70%); }}
+.ac-lp::after {{ content: ""; position: absolute; width: 260px; height: 260px; left: -90px; bottom: -130px;
+                 border-radius: 50%; border: 1px solid rgba(255,255,255,.08); }}
+.ac-lp .kicker {{ color: #FCA5A5; font-size: 12px; letter-spacing: .16em; text-transform: uppercase; font-weight: 500; }}
+.ac-lp h1 {{ color: #fff !important; font-weight: 400; font-size: 38px; line-height: 1.2; margin: 14px 0 14px; padding: 0; }}
+.ac-lp h1 b {{ color: {RED}; font-weight: 500; }}
+.ac-lp p.lead {{ color: #CBD5E1; font-size: 16px; line-height: 1.65; margin: 0 0 30px; max-width: 440px; }}
+.ac-lp ul {{ list-style: none; padding: 0; margin: 0; display: grid; gap: 16px; }}
+.ac-lp li {{ display: flex; gap: 14px; align-items: flex-start; color: #E2E8F0; font-size: 14.5px; line-height: 1.5; margin: 0; }}
+.ac-lp li .dot {{ flex: 0 0 30px; height: 30px; border-radius: 8px; background: rgba(239,68,68,.16); color: #FCA5A5;
+                  display: flex; align-items: center; justify-content: center; font-weight: 500; font-size: 13px; }}
+.ac-lp li b {{ color: #fff; font-weight: 500; }}
+
+.st-key-login_card {{ background: #fff; border-radius: 14px; padding: 40px 36px 30px; min-height: 460px;
+                      border: 1px solid #E5E7EB; box-shadow: 0 24px 48px -28px rgba(15, 23, 42, .35); }}
+.ac-card-head img {{ height: 52px; margin-bottom: 26px; }}
+.ac-card-head h2 {{ color: {NAVY}; font-weight: 500; font-size: 26px; margin: 0 0 6px; padding: 0; }}
+.ac-card-head p {{ color: {GREY}; font-size: 14px; margin: 0 0 22px; }}
+.st-key-login_card [data-testid="stForm"] {{ border: 0; padding: 0; }}
+.st-key-login_card .st-key-access_code input {{ height: 46px; font-size: 16px; }}
+.st-key-login_card div.stFormSubmitButton > button {{ background: {RED}; color: #fff; border: 0; height: 46px;
+    font-weight: 500; font-size: 15px; border-radius: 6px; margin-top: 6px; }}
+.st-key-login_card div.stFormSubmitButton > button:hover {{ background: #DC2626; color: #fff; }}
+.ac-card-help {{ color: {GREY}; font-size: 12.5px; margin-top: 18px; padding-top: 16px; border-top: 1px solid #F1F5F9; }}
+.ac-card-help b {{ color: {NAVY}; font-weight: 500; }}
+@media (max-width: 700px) {{
+  .ac-lp {{ display: none; }}
+  .block-container {{ padding-top: 3vh !important; }}
+  .st-key-login_card {{ min-height: 0; padding: 30px 22px 22px; }}
+}}
+</style>
+"""
+
+
+def login_styles():
+    st.markdown(_LOGIN_CSS, unsafe_allow_html=True)
+
+
+def login_panel():
+    items = [
+        ("PDF or Excel", "digital or scanned financials, one year or several at once"),
+        ("Classified", "every line placed under the firm's taxonomy; new items highlighted yellow"),
+        ("Checked", "the balance sheet must tally and the income statement must match the input"),
+    ]
+    rows = "".join(f'<li><span class="dot">{i}</span><span><b>{html.escape(t)}</b> &mdash; {html.escape(d)}</span></li>'
+                   for i, (t, d) in enumerate(items, 1))
     st.markdown(
-        f'<div class="ac-top"></div><div class="ac-login"><img src="{LOGO_URL}" alt="Acumen M&amp;A Advisors">'
-        '<h2>Common Size Generator</h2><p>For Acumen team members. Enter the shared password to continue.</p></div>',
+        '<div class="ac-lp"><div class="kicker">Acumen M&amp;A Advisors &nbsp;|&nbsp; Internal tool</div>'
+        '<h1>Common Size <b>Generator</b></h1>'
+        '<p class="lead">From a company\'s financial statements to the firm\'s Common Size workbook, '
+        'reconciled and ready for analysis.</p>'
+        f'<ul>{rows}</ul></div>',
         unsafe_allow_html=True)
+
+
+def login_card_head():
+    st.markdown(
+        f'<div class="ac-card-head"><img src="{LOGO_URL}" alt="Acumen M&amp;A Advisors">'
+        '<h2>Sign in</h2><p>Enter the team password to continue.</p></div>',
+        unsafe_allow_html=True)
+
+
+def login_card_help():
+    st.markdown('<div class="ac-card-help"><b>Need access?</b> Ask the Commonsize administrator for the team '
+                'password.</div>', unsafe_allow_html=True)
 
 
 def footer():

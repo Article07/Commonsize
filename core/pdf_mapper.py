@@ -35,7 +35,7 @@ from core.resolver import resolve
 
 TOL = 0.05
 _SUMMARY_LINE = re.compile(
-    r"earning|per\s*equity\s*share|exceptional|extraordinary|profit|loss\b|net\s*worth|^basic$|^diluted$|^total\b",
+    r"earning|per\s*equity\s*share|exceptional|extraordinary|profit|loss\b|net\s*worth|^(?:basic|diluted)|^total\b",
     re.I,
 )
 _RESERVES = re.compile(r"reserves?\s*(?:and|&)\s*surplus", re.I)
@@ -290,7 +290,7 @@ def map_extraction(extraction, unit_multiplier=None):
                 result.log.append(f"{label}: Note {F.note_ref} breakup does not tie to the statement, so the statement figure is used")
             parent_heading = heading
             under_inventory_change = re.search(r"changes?\s*in\s*inventor", heading, re.I) and re.search(
-                r"finished|work.in.progress|wip|stock.in.trade", label, re.I)
+                r"finished|work.in.progress|\bwip\b|stock.in.trade", label, re.I)
             label_for_resolve = f"Changes in inventories {label}" if under_inventory_change else None
             if not under_inventory_change and re.search(r"changes?\s*in\s*inventor", heading, re.I):
                 parent_heading = ""

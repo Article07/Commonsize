@@ -181,6 +181,10 @@ _MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
 def classify_page(lines):
     head = re.sub(r"\s+", " ", " ".join(lines[:14]).upper())
     for line in lines[:10]:
+        # a stray scan mark or serial ("4 | NOTES TO AND FORMING ...") may precede the title
+        if len(line) < 130 and re.search(r"(?:^|\s)NOTES?\s+(?:TO\s+(?:AND\s+FORMING|THE\s+FINANCIAL|FINANCIAL)|FORMING)\b",
+                                         _clean(line), re.I):
+            return "NOTES"
         if len(line) < 130 and re.match(r"^\W*NOTES?\s+(?:TO|FORMING|ON)\b", _clean(line), re.I):
             return "NOTES"
     if "INDEPENDENT AUDITOR" in head:
@@ -307,7 +311,7 @@ def _document_uses_2_decimals(all_lines):
 _ENUMERATOR = re.compile(r"^(?:\(?[a-zA-Z]{1,4}[\)\}]|\(?[ivxlIVXL]{1,4}\)|[ivxlIVXL]{1,4}\s|[a-gA-G]\s(?=[A-Z]))\s*")
 _TOTAL = re.compile(r"^(?:grand\s+)?total\b", re.I)
 _NOTE_HEADER = re.compile(
-    r"^(?:note\s*(?:no\.?)?\s*)?((?=[0-9ilIoO]*\d)[0-9ilIoO]{1,2})(?:\.|\s)+[\(\[\{]?\s*"
+    r"^(?:note\s*(?:no\.?)?\s*)?((?=[0-9ilIoO]*\d)[0-9ilIoO]{1,2})(?:\.|\s)+(?:[0-9]{1,2}(?:\.|\s)+)?[\(\[\{]?\s*"
     r"([A-Za-z][A-Za-z &,/'()\.\-]{2,80}?)\s*:?\s*$"
 )
 _SKIP_LINE = re.compile(
@@ -348,6 +352,13 @@ def parse_line(line, ncols, decimals2, fy_columns):
         elif kind == "int" and not decimals2:
             peeled.append(tokens[i - 1])
             i -= 1
+        elif (kind == "int" and decimals2 and i > 1
+              and _is_valuelike(tokens[i - 2], decimals2) == "value"):
+            # a note reference always sits LEFT of the figures, so a small whole number right of a real
+            # figure is a value that lost its decimal point (0.31 read as 31)
+            peeled.append(tokens[i - 1])
+            flags.append("missing_decimal?")
+            i -= 1
         else:
             break
     peeled.reverse()
@@ -374,7 +385,7 @@ def parse_line(line, ncols, decimals2, fy_columns):
         note_ref = remainder[-1]
         remainder = remainder[:-1]
 
-    label = " ".join(remainder).strip(" :-.")
+    label = " ".join(remainder).strip(" :-.;,")
     label = _ENUMERATOR.sub("", label).strip()
 
     values = {}

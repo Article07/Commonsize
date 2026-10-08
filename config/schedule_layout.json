@@ -1,6 +1,6 @@
 {
   "sheet": "Sch.",
-  "built": "2026-10-06T18:26:14",
+  "built": "2026-10-08T16:21:14",
   "source": "Common size format_Mfg-Trading firm.backup-20260918-125335.xlsx",
   "order": [
     "Share Capital",
@@ -76,254 +76,254 @@
     "Long-term Provisions": {
       "title_row": 24,
       "first_item_row": 26,
-      "last_item_row": 29,
-      "total_row": 30,
+      "last_item_row": 30,
+      "total_row": 31,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 2
+      "spare_rows": 3
     },
     "Borrowings - Long Term": {
-      "title_row": 32,
-      "first_item_row": 34,
-      "last_item_row": 38,
-      "total_row": 39,
+      "title_row": 33,
+      "first_item_row": 35,
+      "last_item_row": 42,
+      "total_row": 43,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 3
+      "spare_rows": 6
     },
     "Trade Payables": {
-      "title_row": 41,
-      "first_item_row": 43,
-      "last_item_row": 48,
-      "total_row": 49,
+      "title_row": 45,
+      "first_item_row": 47,
+      "last_item_row": 54,
+      "total_row": 55,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 3
+      "spare_rows": 5
     },
     "Borrowings - Short Term": {
-      "title_row": 51,
-      "first_item_row": 53,
-      "last_item_row": 59,
-      "total_row": 60,
+      "title_row": 57,
+      "first_item_row": 59,
+      "last_item_row": 68,
+      "total_row": 69,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 3
+      "spare_rows": 6
     },
     "Short-term Provisions": {
-      "title_row": 62,
-      "first_item_row": 64,
-      "last_item_row": 69,
-      "total_row": 70,
+      "title_row": 71,
+      "first_item_row": 73,
+      "last_item_row": 81,
+      "total_row": 82,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 3
+      "spare_rows": 6
     },
     "Current Liability - Other": {
-      "title_row": 72,
-      "first_item_row": 74,
-      "last_item_row": 84,
-      "total_row": 85,
+      "title_row": 84,
+      "first_item_row": 86,
+      "last_item_row": 102,
+      "total_row": 103,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 4
+      "spare_rows": 10
     },
     "Fixed Assets": {
-      "title_row": 87,
-      "first_item_row": 90,
-      "last_item_row": 103,
-      "total_row": 104,
+      "title_row": 105,
+      "first_item_row": 108,
+      "last_item_row": 127,
+      "total_row": 128,
+      "pattern": "total_last",
+      "insertable": true,
+      "spare_rows": 10
+    },
+    "Long-term Loans & Advances": {
+      "title_row": 130,
+      "first_item_row": 132,
+      "last_item_row": 142,
+      "total_row": 143,
+      "pattern": "total_last",
+      "insertable": true,
+      "spare_rows": 10
+    },
+    "Investments": {
+      "title_row": 145,
+      "first_item_row": 147,
+      "last_item_row": 153,
+      "total_row": 154,
       "pattern": "total_last",
       "insertable": true,
       "spare_rows": 4
     },
-    "Long-term Loans & Advances": {
-      "title_row": 106,
-      "first_item_row": 108,
-      "last_item_row": 110,
-      "total_row": 111,
-      "pattern": "total_last",
-      "insertable": true,
-      "spare_rows": 2
-    },
-    "Investments": {
-      "title_row": 113,
-      "first_item_row": 115,
-      "last_item_row": 119,
-      "total_row": 120,
-      "pattern": "total_last",
-      "insertable": true,
-      "spare_rows": 2
-    },
     "Trade Receivables": {
-      "title_row": 122,
-      "first_item_row": 124,
-      "last_item_row": 129,
-      "total_row": 130,
+      "title_row": 156,
+      "first_item_row": 158,
+      "last_item_row": 165,
+      "total_row": 166,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 3
+      "spare_rows": 5
     },
     "Inventory": {
-      "title_row": 132,
-      "first_item_row": 134,
-      "last_item_row": 140,
-      "total_row": 141,
+      "title_row": 168,
+      "first_item_row": 170,
+      "last_item_row": 179,
+      "total_row": 180,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 3
+      "spare_rows": 6
     },
     "Cash & Bank": {
-      "title_row": 143,
-      "first_item_row": 145,
-      "last_item_row": 149,
-      "total_row": 150,
+      "title_row": 182,
+      "first_item_row": 184,
+      "last_item_row": 192,
+      "total_row": 193,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 2
+      "spare_rows": 6
     },
     "Deferred Tax Assets": {
-      "title_row": 152,
-      "first_item_row": 154,
-      "last_item_row": 154,
-      "total_row": 156,
+      "title_row": 195,
+      "first_item_row": 197,
+      "last_item_row": 197,
+      "total_row": 199,
       "pattern": "total_last",
       "insertable": false,
       "spare_rows": 0
     },
     "Deferred Tax Liabilities": {
-      "title_row": 152,
-      "first_item_row": 155,
-      "last_item_row": 155,
-      "total_row": 156,
+      "title_row": 195,
+      "first_item_row": 198,
+      "last_item_row": 198,
+      "total_row": 199,
       "pattern": "single_cell",
       "insertable": false,
       "spare_rows": 0
     },
     "Short-term Loans & Advances": {
-      "title_row": 158,
-      "first_item_row": 160,
-      "last_item_row": 165,
-      "total_row": 166,
+      "title_row": 201,
+      "first_item_row": 203,
+      "last_item_row": 215,
+      "total_row": 216,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 3
+      "spare_rows": 10
     },
     "Current Asset - Other": {
-      "title_row": 168,
-      "first_item_row": 170,
-      "last_item_row": 176,
-      "total_row": 177,
+      "title_row": 218,
+      "first_item_row": 220,
+      "last_item_row": 232,
+      "total_row": 233,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 4
+      "spare_rows": 10
     },
     "Revenue": {
-      "title_row": 179,
-      "first_item_row": 181,
-      "last_item_row": 185,
-      "total_row": 186,
+      "title_row": 235,
+      "first_item_row": 237,
+      "last_item_row": 244,
+      "total_row": 245,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 2
+      "spare_rows": 5
     },
     "Other Income": {
-      "title_row": 188,
-      "first_item_row": 190,
-      "last_item_row": 196,
-      "total_row": 197,
+      "title_row": 247,
+      "first_item_row": 249,
+      "last_item_row": 262,
+      "total_row": 263,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 3
+      "spare_rows": 10
     },
     "COGS-Purchase": {
-      "title_row": 199,
-      "first_item_row": 201,
-      "last_item_row": 201,
-      "total_row": 205,
+      "title_row": 265,
+      "first_item_row": 267,
+      "last_item_row": 267,
+      "total_row": 271,
       "pattern": "total_last",
       "insertable": false,
       "spare_rows": 0
     },
     "Opening Stock (Change in Inventories)": {
-      "title_row": 199,
-      "first_item_row": 203,
-      "last_item_row": 203,
-      "total_row": 205,
+      "title_row": 265,
+      "first_item_row": 269,
+      "last_item_row": 269,
+      "total_row": 271,
       "pattern": "single_cell",
       "insertable": false,
       "spare_rows": 0
     },
     "Closing Stock (Change in Inventories)": {
-      "title_row": 199,
-      "first_item_row": 204,
-      "last_item_row": 204,
-      "total_row": 205,
+      "title_row": 265,
+      "first_item_row": 270,
+      "last_item_row": 270,
+      "total_row": 271,
       "pattern": "single_cell",
       "insertable": false,
       "spare_rows": 0
     },
     "Employee Benefit Expenses": {
-      "title_row": 207,
-      "first_item_row": 209,
-      "last_item_row": 225,
-      "total_row": 226,
+      "title_row": 273,
+      "first_item_row": 275,
+      "last_item_row": 295,
+      "total_row": 296,
       "pattern": "total_last",
       "insertable": true,
-      "spare_rows": 4
+      "spare_rows": 8
     },
     "Depreciation": {
-      "title_row": 228,
-      "first_item_row": 230,
-      "last_item_row": 233,
-      "total_row": 234,
-      "pattern": "total_last",
-      "insertable": true,
-      "spare_rows": 2
-    },
-    "Finance Costs": {
-      "title_row": 236,
-      "first_item_row": 239,
-      "last_item_row": 244,
-      "total_row": 245,
+      "title_row": 298,
+      "first_item_row": 300,
+      "last_item_row": 304,
+      "total_row": 305,
       "pattern": "total_last",
       "insertable": true,
       "spare_rows": 3
     },
-    "Tax Expense": {
-      "title_row": 247,
-      "first_item_row": 249,
-      "last_item_row": 254,
-      "total_row": 255,
+    "Finance Costs": {
+      "title_row": 307,
+      "first_item_row": 310,
+      "last_item_row": 320,
+      "total_row": 321,
       "pattern": "total_last",
-      "insertable": true,
-      "spare_rows": 2
-    },
-    "COGS-Manufacturing": {
-      "title_row": 259,
-      "first_item_row": 260,
-      "last_item_row": 284,
-      "total_row": 259,
-      "pattern": "total_first",
-      "insertable": true,
-      "spare_rows": 6
-    },
-    "Administrative Expenses": {
-      "title_row": 286,
-      "first_item_row": 287,
-      "last_item_row": 321,
-      "total_row": 286,
-      "pattern": "total_first",
       "insertable": true,
       "spare_rows": 8
     },
-    "Selling & Distribution Expenses": {
+    "Tax Expense": {
       "title_row": 323,
-      "first_item_row": 324,
-      "last_item_row": 341,
-      "total_row": 323,
+      "first_item_row": 325,
+      "last_item_row": 332,
+      "total_row": 333,
+      "pattern": "total_last",
+      "insertable": true,
+      "spare_rows": 4
+    },
+    "COGS-Manufacturing": {
+      "title_row": 337,
+      "first_item_row": 338,
+      "last_item_row": 386,
+      "total_row": 337,
       "pattern": "total_first",
       "insertable": true,
-      "spare_rows": 6
+      "spare_rows": 30
+    },
+    "Administrative Expenses": {
+      "title_row": 388,
+      "first_item_row": 389,
+      "last_item_row": 445,
+      "total_row": 388,
+      "pattern": "total_first",
+      "insertable": true,
+      "spare_rows": 30
+    },
+    "Selling & Distribution Expenses": {
+      "title_row": 447,
+      "first_item_row": 448,
+      "last_item_row": 479,
+      "total_row": 447,
+      "pattern": "total_first",
+      "insertable": true,
+      "spare_rows": 20
     }
   }
 }

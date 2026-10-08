@@ -26,7 +26,7 @@ not in the taxonomy can be placed "exactly as the PDF classifies it".
 """
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from rapidfuzz import fuzz
 
@@ -134,6 +134,23 @@ def _items_tie(items, reference, fy_columns):
     return compared > 0
 
 
+def _with_deductions(items, reference, fy_columns):
+    """
+    Note lines such as "Less: Branch Transfer 6,326,463" are printed as positive figures but are deducted.
+    If the note does not add up as printed but does once its "Less" lines are subtracted, use that.
+    Returns the items to use (deducted lines negated), or None if neither version ties.
+    """
+    if _items_tie(items, reference, fy_columns):
+        return items
+    adjusted = []
+    for r in items:
+        if re.match(r"^\W*less\b", r.label, re.I):
+            r = replace(r, values={fy: (-abs(v) if v is not None else None) for fy, v in r.values.items()},
+                        flags=list(r.flags) + ["deduction"])
+        adjusted.append(r)
+    return adjusted if _items_tie(adjusted, reference, fy_columns) else None
+
+
 def _scaled(values, fy_columns, multiplier):
     return {fy: (values[fy] * multiplier if values.get(fy) is not None else None) for fy in fy_columns}
 
@@ -142,7 +159,17 @@ def _all_zero(values):
     return all((v is None or abs(v) < 1e-9) for v in values.values())
 
 
+def _tidy(label):
+    """Drop unbalanced brackets left over from table borders: "Services (Inter Branch )" -> "Services Inter Branch"."""
+    if label.count("(") != label.count(")"):
+        label = label.replace("(", " ").replace(")", " ")
+    label = re.sub(r"\s+\)", ")", label)
+    label = re.sub(r"^\W*less\s*[:\-]+\s*", "Less: ", label, flags=re.I)
+    return re.sub(r"\s{2,}", " ", label).strip()
+
+
 def _make_item(label, values, statement, heading, source, page, flags, fy_columns, multiplier, resolve_label=None):
+    label = _tidy(label)
     res = resolve(resolve_label or label, heading, statement)
     li = LineItem(
         statement=statement,
@@ -301,13 +328,14 @@ def map_extraction(extraction, unit_multiplier=None):
         reference = _reference_values(F, group, fy)
         flags = list(F.flags)
 
-        if group is not None and len(group.items) >= 2 and reference and _items_tie(group.items, reference, fy):
+        note_items = _with_deductions(group.items, reference, fy) if (group is not None and reference) else None
+        if group is not None and len(group.items) >= 2 and note_items is not None:
             # the statement line decides the schedule; a note item only chooses the row inside it, so an
             # "Interest from bank deposits" inside the Other Income note stays in Other Income
             face_key = schedule_for(_side_rules(
                 _make_item(label, reference, F.statement, heading, "pdf-face", F.page, [], fy, mult),
                 F.statement, label, assets_side))
-            for r in group.items:
+            for r in note_items:
                 values = dict(r.values)
                 if _all_zero(values):
                     continue

@@ -68,6 +68,8 @@ def _norm(text):
 
 def _match_row(ws, sched, wanted, used):
     """Row of the schedule whose existing label matches any of `wanted` (best candidates first), else None."""
+    if any(w and re.match(r"^\W*less\b", w, re.I) for w in wanted):
+        return None   # a "Less: ..." deduction is never merged into the line it is deducted from
     rows = []
     for r in range(sched["first_item_row"], sched["last_item_row"] + 1):
         label = ws.cell(r, 2).value
@@ -125,16 +127,33 @@ def _comment(item):
     return Comment("; ".join(parts), "Commonsize app")
 
 
+def _row_labelled(ws, sched, pattern):
+    for r in range(sched["first_item_row"], sched["last_item_row"] + 1):
+        label = ws.cell(r, 2).value
+        if label and not ws.row_dimensions[r].hidden and re.search(pattern, str(label), re.I):
+            return r
+    return None
+
+
 def _revenue_row(ws, sched, item):
-    names = [item.matched_item, item.line_item]
-    row = _match_row(ws, sched, names, set())
+    text = item.line_item.lower()
+    if re.match(r"^\W*less\b", text):
+        return None   # a deduction (branch transfer, inter-branch sales ...) keeps its own row
+    if re.search(r"scrap|freight|drawback|export\s*incentive|other\s*operating", text):
+        row = _row_labelled(ws, sched, r"other\s*operating")
+        if row:
+            return row
+    row = _match_row(ws, sched, [item.line_item], set())   # own label only: a loose alias must not merge lines
     if row:
         return row
-    text = item.line_item.lower()
     second = sched["first_item_row"] + 1
-    if any(w in text for w in REVENUE_SERVICE_WORDS) and ws.cell(second, 2).value:
+    is_service = re.fullmatch(r"\W*(?:sale\s*of\s*services?|services?\s*(?:income|revenue)|income\s*from\s*services?)\W*", text)
+    if is_service and ws.cell(second, 2).value:
         return second
-    return sched["first_item_row"]   # "Sale of goods": the template's own label is kept
+    if re.search(r"revenue\s*from\s*operations|^\W*(?:net\s+)?(?:sales|turnover)\b|sale\s*of\s*(?:products|goods)"
+                 r"|manufactured\s*goods|sale\s*of\s*manufactured", text):
+        return sched["first_item_row"]   # "Sale of goods": the template's own label is kept
+    return None   # a specific revenue line (branch transfer, scrap, freight ...) gets its own row
 
 
 def _place_in_spare(ws, key, item, fy_columns, report, used_spares):

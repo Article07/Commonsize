@@ -204,5 +204,7 @@ def extract_excel(source):
     if not pages:
         raise ValueError("No Balance Sheet, Profit & Loss or Notes sheet with year columns was found in this workbook.")
     result = extract_from_pages(pages)
+    for row in result.rows:   # scan-repair flags mean nothing for cell values
+        row.flags = [f for f in row.flags if f not in ("bracket_noise", "decimal_repaired")]
     result.warnings.append("Read from Excel: figures are the cell values as saved in the workbook.")
     return result

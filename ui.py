@@ -22,6 +22,7 @@ button, input, textarea {{ font-family: 'Roboto', sans-serif; }}
 [data-testid="stIconMaterial"], [class*="material-symbols"], .material-icons {{
     font-family: 'Material Symbols Rounded', 'Material Icons' !important; }}
 #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] {{ display: none !important; }}
+[data-testid="InputInstructions"] {{ display: none !important; }}   /* "Press Enter to submit form / to apply" */
 header[data-testid="stHeader"] {{ background: transparent; height: 0; }}
 .block-container {{ max-width: 1180px; padding-top: 0 !important; padding-bottom: 3rem; }}
 

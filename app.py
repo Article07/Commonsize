@@ -20,7 +20,8 @@ from config.schedule_map import FY_COLUMN_MAP
 import ui
 from core import pipeline
 from core.routing import all_placeable_schedules, schedule_for
-from core.workbook_reader import merge_new_year, read_workbook
+from core.multi_year import Source, combine, fy_key
+from core.workbook_reader import merge_new_years, read_workbook
 
 st.set_page_config(page_title="Acumen | Common Size Generator", page_icon=None, layout="wide")
 ui.apply_theme()
@@ -165,30 +166,69 @@ def _is_structured(raw):
         return False
 
 
-def _read_input(upload, kind):
-    """-> dict(items, fy_cols, mult, unit, extraction|None, log)"""
+def _unit_label(mult):
+    return next((label for label, m in UNIT_CHOICES.items() if m == mult), "Rs. (whole rupees)")
+
+
+def _read_source(upload, kind, bar, index, total):
+    """One uploaded file -> Source."""
     raw = upload.getvalue()
+    label = f"File {index + 1} of {total}: {upload.name}"
+    bar.progress(index / total, text=label)
     if kind == "pdf":
-        bar = st.progress(0.0, text="Reading the PDF ...")
-        extraction, mapping = pipeline.read_pdf(raw, progress=lambda d, t, m: bar.progress(d / t, text=m))
-        bar.empty()
+        extraction, mapping = pipeline.read_pdf(
+            raw, progress=lambda d, t, m: bar.progress(min((index + d / t) / total, 1.0), text=f"{label}  ({m})"))
     elif upload.name.lower().endswith(".csv") or _is_structured(raw):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / upload.name
             path.write_bytes(raw)
             items = pipeline.read_structured(path)
-        fys = sorted({fy for i in items for fy in i.fy_values}, key=lambda f: list(FY_COLUMN_MAP).index(f)
-                     if f in FY_COLUMN_MAP else 99)
-        return dict(items=items, fy_cols=fys, mult=1, unit="Rs. (whole rupees)", extraction=None, log=[])
+        fys = sorted({fy for i in items for fy in i.fy_values}, key=fy_key)
+        return Source(upload.name, items, fys)
     else:
         extraction, mapping = pipeline.read_excel(raw)
-    return dict(items=mapping.items, fy_cols=sorted(extraction.fy_columns), mult=extraction.unit_multiplier,
-                unit=extraction.unit_label, extraction=extraction, log=mapping.log + extraction.warnings)
+    return Source(upload.name, mapping.items, sorted(extraction.fy_columns, key=fy_key), extraction.unit_multiplier,
+                  extraction.unit_label, extraction, mapping.log + extraction.warnings)
 
 
-def _reconciliation_panel(extraction, items, fy_cols, mult, unit_label):
-    """Shows that the workbook's figures equal what the input itself prints, line by line."""
-    rows = pipeline.reconcile(extraction, items, fy_cols)
+def _combine_into(data):
+    sources = data["sources"]
+    comb = combine(sources)
+    mults = {s.mult for s in sources}
+    mult = mults.pop() if len(mults) == 1 else 1
+    data.update(items=comb.items, fy_cols=comb.fy_cols, owner=comb.owner, warnings=comb.warnings, mult=mult,
+                unit=sources[0].unit if len(sources) == 1 else _unit_label(mult))
+
+
+def _per_file(data, fy_cols):
+    """[(index, source, years of fy_cols taken from it)] for files that have an extraction."""
+    out = []
+    for i, s in enumerate(data["sources"]):
+        years = [fy for fy in fy_cols if data["owner"].get(fy) == i]
+        if s.extraction is not None and years:
+            out.append((i, s, years))
+    return out
+
+
+def _reported(data, fy_cols):
+    reported = {}
+    for _, s, years in _per_file(data, fy_cols):
+        pat = pipeline.reported_pat(s.extraction)
+        reported.update({fy: pat[fy] for fy in years if fy in pat})
+    return reported
+
+
+def _reconciliation_panel(data, items, fy_cols, mult, unit_label):
+    """Shows that the workbook's figures equal what each input file itself prints, line by line."""
+    many = len(data["sources"]) > 1
+    rows, own_gaps = [], []
+    for _, s, years in _per_file(data, fy_cols):
+        for r in pipeline.reconcile(s.extraction, items, years):
+            r["file"] = s.name
+            rows.append(r)
+        src = pipeline.source_balance(s.extraction, years)
+        tol = pipeline.tolerance(s.extraction.unit_multiplier)
+        own_gaps += [(s.name, fy, a, b) for fy, (a, b) in src.items() if abs(a - b) > tol]
     if not rows:
         st.info("The input does not print totals that can be compared (for example an unreadable scan).")
         return
@@ -204,22 +244,20 @@ def _reconciliation_panel(extraction, items, fy_cols, mult, unit_label):
         st.success("Every compared figure (revenue, total income, total expenses, PBT, tax, profit, balance-sheet totals) "
                    "equals the input.")
     st.dataframe(pd.DataFrame([{
+        **({"File": r["file"]} if many else {}),
         "Year": r["year"], "Line": r["line"], f"Workbook ({unit_label})": _fmt(r["computed"] / mult),
         f"Input ({unit_label})": _fmt(r["reported"] / mult), "Difference": _fmt(r["diff"] / mult),
         "Match": "OK" if r["ok"] else "DIFFERS"} for r in rows]), hide_index=True, width="stretch")
-    src = pipeline.source_balance(extraction, fy_cols)
-    tol = pipeline.tolerance(extraction.unit_multiplier)
-    own = {fy: (a - b) for fy, (a, b) in src.items() if abs(a - b) > tol}
-    if own:
+    if own_gaps:
         st.warning("The input's own Balance Sheet does not balance: " + "; ".join(
-            f"{fy}: total liabilities {src[fy][0] / mult:,.2f} vs total assets {src[fy][1] / mult:,.2f} "
-            f"(out by {d / mult:,.2f})" for fy, d in own.items())
+            (f"{name}, " if many else "") + f"{fy}: total liabilities {a / mult:,.2f} vs total assets {b / mult:,.2f} "
+            f"(out by {(a - b) / mult:,.2f})" for name, fy, a, b in own_gaps)
             + ". The workbook reproduces the input faithfully, so this difference shows in the Balance Sheet check. "
               "It has to be corrected in the source financials; the app does not plug it.")
 
 
-def _suggestions(extraction, items, fy_cols):
-    found = pipeline.suggest_fixes(extraction, items, fy_cols)
+def _suggestions(data, items, fy_cols):
+    found = [f for _, s, years in _per_file(data, fy_cols) for f in pipeline.suggest_fixes(s.extraction, items, years)]
     if not found:
         return
     st.markdown("**Suggested corrections**")
@@ -239,10 +277,10 @@ def _suggestions(extraction, items, fy_cols):
 _gate()
 ui.header()
 ui.hero("Common Size, prepared from the financial statements",
-        "Upload a company's financials as a PDF (digital or scanned) or an Excel file. The app reads them, "
-        "classifies every line, checks that the balance sheet tallies and the income statement matches the input, "
-        "and gives you the firm's Common Size workbook.")
-ui.step(1, "Choose the input", "Start a new workbook, or add a year to one you already prepared.")
+        "Upload a company's financials as PDFs (digital or scanned) or Excel files, one or several years at once. "
+        "The app reads them, classifies every line, checks that the balance sheet tallies and the income statement "
+        "matches the input, and gives you the firm's Common Size workbook.")
+ui.step(1, "Choose the input", "Start a new workbook, or add years to one you already prepared.")
 mode = st.radio("What would you like to do?", ["New common size", "Add a new financial year to an existing workbook"],
                 horizontal=True)
 
@@ -263,48 +301,77 @@ if mode.startswith("Add"):
 
 kind_label = st.radio("Input file type", ["PDF (digital or scanned)", "Excel"], horizontal=True)
 kind = "pdf" if kind_label.startswith("PDF") else "excel"
-upload = st.file_uploader("Financial statements (Balance Sheet, Profit & Loss and Notes)",
-                          type=["pdf"] if kind == "pdf" else ["xlsx", "xlsm", "csv"], key=f"fin-{kind}")
+uploads = st.file_uploader(
+    "Financial statements (Balance Sheet, Profit & Loss and Notes). Several files of the same company can be "
+    "uploaded together, e.g. one per financial year.",
+    type=["pdf"] if kind == "pdf" else ["xlsx", "xlsm", "csv"], key=f"fin-{kind}", accept_multiple_files=True)
 company = st.text_input("Company name", value=existing.company if existing else "")
 equity = st.text_input("Number of equity shares (optional)", value=existing.equity_shares if existing else "")
 
-if upload is None:
+if not uploads:
     _stop()
 
-sig = (kind, upload.name, upload.size)
+sig = (kind, tuple((u.name, u.size) for u in uploads))
 if st.session_state.get("sig") != sig:
     st.session_state.pop("data", None)
     st.session_state["sig"] = sig
     st.session_state["review_version"] = 0
 if "data" not in st.session_state:
-    if st.button("Read the file", type="primary"):
-        try:
-            st.session_state["data"] = _read_input(upload, kind)
-        except Exception as exc:   # OCR missing, unreadable file ...
-            st.error(f"Could not read this file: {exc}")
-            _stop()
+    label = "Read the file" if len(uploads) == 1 else f"Read the {len(uploads)} files"
+    if st.button(label, type="primary"):
+        bar = st.progress(0.0, text="Starting ...")
+        sources = []
+        for i, upload in enumerate(uploads):
+            try:
+                sources.append(_read_source(upload, kind, bar, i, len(uploads)))
+            except Exception as exc:   # OCR missing, unreadable file ...
+                bar.empty()
+                st.error(f"Could not read '{upload.name}': {exc}")
+                _stop()
+        bar.empty()
+        data = {"sources": sources}
+        _combine_into(data)
+        st.session_state["data"] = data
         st.rerun()
     _stop()
 
 data = st.session_state["data"]
-extraction = data["extraction"]
+sources = data["sources"]
 ui.step(2, "Review what was read", "Correct any misread figure, move a line to another schedule, or untick it.")
 
-if extraction is not None:
+readable = [(i, s) for i, s in enumerate(sources) if s.extraction is not None]
+if readable:
     labels = list(UNIT_CHOICES)
-    current = next((l for l in labels if UNIT_CHOICES[l] == data["mult"]), labels[0])
-    chosen = st.selectbox(f"Unit of the figures (detected: {data['unit']})", labels, index=labels.index(current))
-    if UNIT_CHOICES[chosen] != data["mult"]:
-        data["items"] = pipeline.remap(extraction, UNIT_CHOICES[chosen]).items
-        data["mult"], data["unit"] = UNIT_CHOICES[chosen], chosen
-        st.session_state["review_version"] += 1
-        st.rerun()
+    holder = st.expander("Units of the figures") if len(readable) > 1 else st.container()
+    with holder:
+        for i, s in readable:
+            current = _unit_label(s.mult)
+            caption = f"Unit of the figures in {s.name} (detected: {s.unit})" if len(sources) > 1 \
+                else f"Unit of the figures (detected: {s.unit})"
+            chosen = st.selectbox(caption, labels, index=labels.index(current), key=f"unit-{i}")
+            if UNIT_CHOICES[chosen] != s.mult:
+                s.items = pipeline.remap(s.extraction, UNIT_CHOICES[chosen]).items
+                s.mult, s.unit = UNIT_CHOICES[chosen], chosen
+                _combine_into(data)
+                st.session_state["review_version"] += 1
+                st.rerun()
 mult, unit = data["mult"], data["unit"]
 
-if extraction is not None:
-    with st.expander("What the reader found and checked"):
-        for line in data["log"] + extraction.checks:
+if len(sources) > 1:
+    by_file = {}
+    for fy in data["fy_cols"]:
+        by_file.setdefault(sources[data["owner"][fy]].name, []).append(fy)
+    st.caption("Each year is taken from the file in which it is the current year: "
+               + "; ".join(f"{', '.join(fys)} from {name}" for name, fys in by_file.items()) + ".")
+for w in data.get("warnings", []):
+    st.warning(w)
+with st.expander("What the reader found and checked"):
+    for s in sources:
+        if len(sources) > 1:
+            st.markdown(f"**{s.name}**")
+        for line in s.log + (s.extraction.checks if s.extraction is not None else []):
             st.write("- " + line)
+
 unsupported = [fy for fy in data["fy_cols"] if fy not in FY_COLUMN_MAP]
 if unsupported:
     st.warning(f"{', '.join(unsupported)} is outside the template's years ({', '.join(FY_COLUMN_MAP)}) and will not be written.")
@@ -314,23 +381,30 @@ if existing:
     later = [fy for fy in available if not existing.fy_columns
              or list(FY_COLUMN_MAP).index(fy) > list(FY_COLUMN_MAP).index(existing.fy_columns[-1])]
     if not later:
-        st.error("The file has no year later than the latest year already in the workbook.")
+        st.error("The files have no year later than the latest year already in the workbook.")
         _stop()
-    new_fy = st.selectbox("Year to add", later)
-    review_cols = [new_fy]
+    review_cols = st.multiselect("Years to add", later, default=later)
 else:
-    default = available[-2:] if len(available) > 2 else available   # a third, older column is often only a partial comparative
+    if len(sources) == 1:
+        # a third, older column of a single file is often only a partial comparative
+        default = available[-2:] if len(available) > 2 else available
+    else:
+        # with several files, the years that are some file's own current year; an older comparative-only
+        # year can still be ticked
+        currents = {s.current for s in sources}
+        default = [fy for fy in available if fy in currents] or available
     review_cols = st.multiselect("Years to include", available, default=default)
-    if not review_cols:
-        _stop()
+if not review_cols:
+    _stop()
+review_cols = sorted(review_cols, key=fy_key)
 
 items = _review_table(data["items"], review_cols, mult, unit, key=f"review-{sig}-{st.session_state['review_version']}")
-reported_all = pipeline.reported_pat(extraction) if extraction is not None else {}
+reported_all = _reported(data, review_cols)
 
 ui.step(3, "Check the numbers", "The balance sheet must tally and the income statement must match the input.")
 if existing:
     try:
-        merged, all_cols, reported, warns = merge_new_year(existing, items, new_fy, reported_all)
+        merged, all_cols, reported, warns = merge_new_years(existing, items, review_cols, reported_all)
     except ValueError as exc:
         st.error(str(exc))
         _stop()
@@ -340,11 +414,8 @@ if existing:
     _generate(merged, all_cols, company or existing.company, equity, reported,
               f"{(company or existing.company)} - Common Size.xlsx")
 else:
-    if extraction is not None:
-        _suggestions(extraction, items, review_cols)
+    _suggestions(data, items, review_cols)
     _balance_panel(items, review_cols, mult, unit)
-    if extraction is not None:
-        _reconciliation_panel(extraction, items, review_cols, mult, unit)
-    _generate(items, review_cols, company or "Company", equity,
-              {fy: v for fy, v in reported_all.items() if fy in review_cols}, f"{company or 'Company'} - Common Size.xlsx")
+    _reconciliation_panel(data, items, review_cols, mult, unit)
+    _generate(items, review_cols, company or "Company", equity, reported_all, f"{company or 'Company'} - Common Size.xlsx")
 ui.footer()

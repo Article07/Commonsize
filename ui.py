@@ -66,7 +66,18 @@ html, body {{ overflow-x: hidden; }}
 [data-testid="stAlert"] {{ border-radius: 6px; }}
 .stRadio label p, .stSelectbox label p, .stTextInput label p, .stMultiSelect label p, .stFileUploader label p {{
     color: {NAVY}; font-weight: 500; }}
-[data-testid="stFileUploaderDropzone"] {{ border: 1.5px dashed {RED}66; background: #FEF2F2; border-radius: 6px; }}
+[data-testid="stFileUploaderDropzone"] {{
+    border: 2px dashed {RED}88; background: #FEF2F2; border-radius: 8px; min-height: 170px; padding: 22px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center;
+    transition: background .15s, border-color .15s; }}
+[data-testid="stFileUploaderDropzone"]:hover, [data-testid="stFileUploaderDropzone"]:focus-within {{
+    background: #FEE2E2; border-color: {RED}; }}
+[data-testid="stFileUploaderDropzoneInstructions"] {{ display: flex; flex-direction: column; align-items: center; }}
+[data-testid="stFileUploaderDropzone"]:not(:has([data-testid="stFileUploaderDropzoneInstructions"]))::after {{
+    content: "Drop more files anywhere in this box"; color: {GREY}; font-size: 13px; }}
+[data-testid="stFileUploaderDropzoneInstructions"]::before {{
+    content: "Drag and drop your files anywhere in this box"; display: block; color: {NAVY}; font-weight: 500;
+    font-size: 16px; margin-bottom: 4px; }}
 div.stButton > button[kind="primary"], div.stDownloadButton > button {{
     background: {RED}; border: 0; color: #fff; font-weight: 500; padding: .55rem 1.4rem; border-radius: 4px; }}
 div.stButton > button[kind="primary"]:hover, div.stDownloadButton > button:hover {{ background: #DC2626; color: #fff; }}

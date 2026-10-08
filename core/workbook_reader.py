@@ -143,3 +143,14 @@ def merge_new_year(existing, new_items, new_fy, new_reported_pat=None):
     if new_reported_pat and new_reported_pat.get(new_fy) is not None:
         reported[new_fy] = new_reported_pat[new_fy]
     return merged, sorted(set(existing.fy_columns) | {new_fy}, key=order.index), reported, warnings
+
+
+def merge_new_years(existing, new_items, new_fys, new_reported_pat=None):
+    """merge_new_year for several later years at once (oldest first). Returns (items, fy_columns, reported_pat, warnings)."""
+    data, warnings = existing, []
+    for fy in sorted(new_fys):
+        items, fy_columns, reported, warns = merge_new_year(data, new_items, fy, new_reported_pat)
+        warnings += warns
+        data = WorkbookData(company=existing.company, equity_shares=existing.equity_shares, fy_columns=fy_columns,
+                            items=items, reported_pat=reported)
+    return data.items, data.fy_columns, data.reported_pat, warnings

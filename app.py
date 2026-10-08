@@ -314,7 +314,8 @@ uploads = st.file_uploader(
     "uploaded together, e.g. one per financial year.",
     type=["pdf"] if kind == "pdf" else ["xlsx", "xlsm", "csv"], key=f"fin-{kind}", accept_multiple_files=True)
 company = st.text_input("Company name", value=existing.company if existing else "")
-equity = st.text_input("Number of equity shares (optional)", value=existing.equity_shares if existing else "")
+# no equity-share input: a workbook being extended keeps the share label it already has
+equity = existing.equity_shares if existing else ""
 
 if not uploads:
     _stop()

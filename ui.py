@@ -150,9 +150,19 @@ _LOGIN_CSS = f"""
 .st-key-login_card div.stFormSubmitButton > button:hover {{ background: #DC2626; color: #fff; }}
 .ac-card-help {{ color: {GREY}; font-size: 12.5px; margin-top: 18px; padding-top: 16px; border-top: 1px solid #F1F5F9; }}
 .ac-card-help b {{ color: {NAVY}; font-weight: 500; }}
-.ac-showpw {{ display: inline-flex; align-items: center; gap: 8px; color: {GREY}; font-size: 13.5px; cursor: pointer;
-              user-select: none; margin: 2px 0 4px; }}
-.ac-showpw input {{ width: 16px; height: 16px; accent-color: {RED}; cursor: pointer; margin: 0; }}
+.st-key-login_card [data-testid="stForm"] {{ position: relative; }}
+.st-key-login_card [data-testid="stElementContainer"]:has(.ac-eye) {{
+    position: absolute; top: 0; right: 6px; width: auto !important; height: 46px; margin: 0; z-index: 3;
+    display: flex; align-items: center; }}
+.st-key-login_card .st-key-access_code input {{ padding-right: 48px; }}
+.ac-eye-cb {{ display: none; }}
+.ac-eye {{ display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 6px;
+           cursor: pointer; color: {GREY}; margin: 0; }}
+.ac-eye:hover {{ background: #E2E8F0; color: {NAVY}; }}
+.ac-eye svg {{ width: 20px; height: 20px; }}
+.ac-eye .eye-off {{ display: none; }}
+.stApp:has(#ac-showpw:checked) .ac-eye .eye-on {{ display: none; }}
+.stApp:has(#ac-showpw:checked) .ac-eye .eye-off {{ display: block; }}
 .stApp:has(#ac-showpw:checked) .st-key-access_code input {{ -webkit-text-security: none; text-security: none;
                                                              letter-spacing: normal; }}
 @media (max-width: 700px) {{
@@ -192,9 +202,22 @@ def login_card_head():
         unsafe_allow_html=True)
 
 
+_EYE = ('<svg class="eye-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>'
+        '<circle cx="12" cy="12" r="3"/></svg>'
+        '<svg class="eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8'
+        'a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>'
+        '<path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>')
+
+
 def show_password_toggle():
-    """A plain HTML tick box; CSS (:has) unmasks the password box while it is ticked. No rerun, nothing sent."""
-    st.markdown('<label class="ac-showpw" for="ac-showpw"><input type="checkbox" id="ac-showpw"> Show password</label>',
+    """
+    Eye icon inside the password box. It is a label for a hidden tick box; CSS (:has) unmasks the box while
+    it is ticked and swaps the icon. No rerun, nothing sent, the typed password stays.
+    """
+    st.markdown(f'<input type="checkbox" id="ac-showpw" class="ac-eye-cb">'
+                f'<label class="ac-eye" for="ac-showpw" title="Show or hide the password">{_EYE}</label>',
                 unsafe_allow_html=True)
 
 

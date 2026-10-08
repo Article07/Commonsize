@@ -234,8 +234,8 @@ MATCHABLE_TAXONOMY = [e for e in TAXONOMY if e.target is not None]
 BS_ALIASES = [
     (r"securities\s*premium", "tag", "Securities Premium", ""),
     (r"share\s*capital|equity\s*shares?|paid.?up", "tag", "Paid-up Share Capital", ""),
-    (r"deferred\s*tax\s*liabilit", "tag", "Deferred Tax Liabilities", ""),
-    (r"deferred\s*tax\s*asset", "tag", "Deferred Tax Assets", ""),
+    (r"def+er+ed\s*tax\s*liabilit", "tag", "Deferred Tax Liabilities", ""),
+    (r"def+er+ed\s*tax\s*asset", "tag", "Deferred Tax Assets", ""),
     (r"long.?term\s*provision", "tag", "Long-term Provisions", "Provision for gratuity"),
     (r"short.?term\s*provision|provisions?\s*for", "tag", "Short-term Provisions", "Provision for expenses"),
     (r"long.?term\s*loans?\s*(and|&)\s*advances|security\s*deposit", "tag", "Long-term Loans & Advances", "Security deposits"),

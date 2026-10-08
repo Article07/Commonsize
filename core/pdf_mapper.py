@@ -32,13 +32,19 @@ from rapidfuzz import fuzz
 
 from core.models import LineItem
 from core.resolver import resolve
+from core.routing import schedule_for
 
 TOL = 0.05
 _SUMMARY_LINE = re.compile(
-    r"earning|per\s*equity\s*share|exceptional|extraordinary|profit|loss\b|net\s*worth|^(?:basic|diluted)|^total\b",
+    r"earning|per\s*equity\s*share|exceptional|extraordinary|profit|loss\b|net\s*worth|^(?:basic|diluted)|^total\b"
+    r"|ebitda|\bratio\b|%\s*$",
     re.I,
 )
 _RESERVES = re.compile(r"reserves?\s*(?:and|&)\s*surplus", re.I)
+# the year's profit line in a reserves note: the template adds the P&L profit itself
+_PROFIT_LINE = re.compile(r"net\s*profit|profit\s*for|profit\s*/\s*\(?loss\)?|closing", re.I)
+# schedules that share one line of the income statement, so a note item may move between them
+_SAME_IS_LINE = [{"Administrative Expenses", "Selling & Distribution Expenses"}, {"COGS-Purchase", "COGS-Manufacturing"}]
 
 
 @dataclass
@@ -187,19 +193,33 @@ def _less_sign(group, fy_columns):
         for r in group.items:
             v = r.values.get(fy)
             low = r.label.lower()
-            if v is None or re.search(r"opening|closing|net\s*profit|profit\s*for", low):
+            if v is None or re.search(r"opening", low) or _PROFIT_LINE.search(low):
                 continue
             if low.startswith("less"):
                 less_abs += abs(v)
             else:
                 fixed += v
-        profit = row_value(r"net\s*profit|profit\s*for", fy) or 0.0
+        profit = row_value(r"net\s*profit|profit\s*for|profit\s*/\s*\(?loss\)?", fy) or 0.0
         base = opening + profit + fixed
         if abs(base - less_abs - closing) <= TOL:
             signs[fy] = -1
         elif abs(base + less_abs - closing) <= TOL:
             signs[fy] = 1
     return lambda fy: signs.get(fy, -1)
+
+
+def _side_rules(item, statement, label, assets_side):
+    """
+    Deferred tax: the side of the balance sheet it is printed on decides, whatever the label says
+    ("Deferred Tax Liabilities (net)" printed under Non-Current Assets is an asset). assets_side is
+    True / False from the line's position, or None when the position is unknown (then the label decides).
+    """
+    if statement == "BS" and re.search(r"def+er+ed\s*tax", label, re.I):
+        is_asset = assets_side if assets_side is not None else bool(re.search(r"asset", label, re.I))
+        item.statement_tag = "Deferred Tax Assets" if is_asset else "Deferred Tax Liabilities"
+        item.category, item.is_new, item.confidence = "", False, "Matched"
+        item.flags = [f for f in item.flags if f != "unplaced"]
+    return item
 
 
 def _map_reserves(groups, fy_columns, multiplier, result):
@@ -216,7 +236,7 @@ def _map_reserves(groups, fy_columns, multiplier, result):
                     tag = "Opening Reserves"
                 elif re.search(r"securities\s*premium", low):
                     tag = "Securities Premium"
-                elif re.search(r"net\s*profit|closing|profit\s*for", low):
+                elif _PROFIT_LINE.search(low):
                     continue  # derived by the template from the P&L / roll-forward
                 else:
                     tag = "Reserves Adjustments"
@@ -251,8 +271,19 @@ def map_extraction(extraction, unit_multiplier=None):
 
     _map_reserves(groups, fy, mult, result)
 
+    assets_side, seen_total = None, False   # where on the balance sheet the line sits
     for F in face:
         label = F.label
+        if F.statement == "BS":
+            section = F.heading or ""
+            if re.search(r"\bassets?\b", section, re.I):
+                assets_side = True
+            elif re.search(r"liabilit|equity|shareholder|net\s*worth", section, re.I):
+                assets_side = False
+            elif seen_total:
+                assets_side = True        # Schedule III order: equity & liabilities, their Total, then assets
+            if F.is_total and re.fullmatch(r"total\W*", label.strip(), re.I):
+                seen_total = True
         if F.is_total or _RESERVES.search(label):
             continue
         if _SUMMARY_LINE.search(label) and not re.search(r"other\s*income", label, re.I):
@@ -271,13 +302,22 @@ def map_extraction(extraction, unit_multiplier=None):
         flags = list(F.flags)
 
         if group is not None and len(group.items) >= 2 and reference and _items_tie(group.items, reference, fy):
+            # the statement line decides the schedule; a note item only chooses the row inside it, so an
+            # "Interest from bank deposits" inside the Other Income note stays in Other Income
+            face_key = schedule_for(_side_rules(
+                _make_item(label, reference, F.statement, heading, "pdf-face", F.page, [], fy, mult),
+                F.statement, label, assets_side))
             for r in group.items:
                 values = dict(r.values)
                 if _all_zero(values):
                     continue
                 kept = [f for f in r.flags if f not in ("sum_mismatch", "differs_from_note")]
-                result.items.append(_make_item(r.label, values, F.statement, group.title, "pdf-note", r.page,
-                                               kept, fy, mult))
+                item = _make_item(r.label, values, F.statement, group.title, "pdf-note", r.page, kept, fy, mult)
+                own_key = schedule_for(item)
+                if face_key and own_key != face_key and not any({own_key, face_key} <= g for g in _SAME_IS_LINE):
+                    item.schedule_override = face_key
+                    item.flags = [f for f in item.flags if f != "unplaced"] + ["placed_under_statement_heading"]
+                result.items.append(item)
             result.log.append(f"{label}: itemised from Note {F.note_ref} ({len(group.items)} lines, ties to the statement)")
             continue
 
@@ -296,6 +336,7 @@ def map_extraction(extraction, unit_multiplier=None):
                 parent_heading = ""
             item = _make_item(label, F.values, F.statement, parent_heading, "pdf-face", F.page,
                               flags, fy, mult, resolve_label=label_for_resolve)
+            _side_rules(item, F.statement, label, assets_side)
             if group is not None and group.total is not None:
                 # the note's own total, kept as a possible correction when the face figure looks misread
                 for fy_ in fy:

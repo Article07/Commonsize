@@ -204,7 +204,7 @@ _UNIT_PATTERNS = [
     (re.compile(r"in\s+(?:rs\.?\s*)?(?:lakhs?|lacs?)\b|in\s+rs\.?\s*in\s+lakhs?", re.I), 100_000, "Rs. in lakhs"),
     (re.compile(r"in\s+(?:rs\.?\s*)?crores?\b|in\s+rs\.?\s*in\s+crores?", re.I), 10_000_000, "Rs. in crores"),
     (re.compile(r"in\s+(?:rs\.?\s*)?(?:millions?|mn)\b", re.I), 1_000_000, "Rs. in millions"),
-    (re.compile(r"amount\s+in\s+(?:rs\.?|rupees|inr|₹)", re.I), 1, "Rs. (whole rupees)"),
+    (re.compile(r"(?:amount|amt\.?)\s*in\s+(?:rs\.?|rupees|inr|₹)|\(\s*rupees\s*\)", re.I), 1, "Rs. (whole rupees)"),
 ]
 
 
@@ -311,7 +311,7 @@ def _document_uses_2_decimals(all_lines):
 _ENUMERATOR = re.compile(r"^(?:\(?[a-zA-Z]{1,4}[\)\}]|\(?[ivxlIVXL]{1,4}\)|[ivxlIVXL]{1,4}\s|[a-gA-G]\s(?=[A-Z]))\s*")
 _TOTAL = re.compile(r"^(?:grand\s+)?total\b", re.I)
 _NOTE_HEADER = re.compile(
-    r"^(?:note\s*(?:no\.?)?\s*)?((?=[0-9ilIoO]*\d)[0-9ilIoO]{1,2})(?:\.|\s)+(?:[0-9]{1,2}(?:\.|\s)+)?[\(\[\{]?\s*"
+    r"^(?:(?i:note)\s*(?:(?i:no)\.?)?\s*)?((?=[0-9ilIoO]*\d)[0-9ilIoO]{1,2})(?:[.:\-]|\s)+(?:[0-9]{1,2}(?:[.:\-]|\s)+)?[\(\[\{]?\s*"
     r"([A-Za-z][A-Za-z &,/'()\.\-]{2,80}?)\s*:?\s*$"
 )
 _SKIP_LINE = re.compile(
@@ -456,14 +456,15 @@ def extract_rows(pages, fy_columns, decimals2):
             text = _clean(raw).lstrip(": .-")
             if not text or len(text) < 3:
                 continue
-            if (pg.page, raw) in boilerplate or _SKIP_LINE.match(text):
-                continue
-            if statement == "NOTE":
+            if statement == "NOTE" and (pg.page, raw) not in boilerplate:
+                # checked before the skip list, which would otherwise drop "NOTE 2 : RESERVES & SURPLUS"
                 m = _NOTE_HEADER.match(text)
                 if m and not re.search(r"\d[\d,]*\.\d", text):
                     current_note_no = _normalise_note_no(m.group(1))
                     note_title = m.group(2).strip(" :")
                     continue
+            if (pg.page, raw) in boilerplate or _SKIP_LINE.match(text):
+                continue
             label, note_ref, values, flags, n_vals = parse_line(raw, ncols, decimals2, fy_columns)
             if not label:
                 continue

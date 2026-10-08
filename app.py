@@ -49,6 +49,7 @@ def _gate():
                 # in a saved password nor offer to create one; they only act on type="password" fields.
                 entered = st.text_input("Password", autocomplete="off", key="access_code",
                                         placeholder="Team password")
+                ui.show_password_toggle()
                 submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
             if submitted and entered and hmac.compare_digest(entered.encode(), expected.encode()):
                 st.session_state["authed"] = True

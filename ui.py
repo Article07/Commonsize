@@ -150,6 +150,11 @@ _LOGIN_CSS = f"""
 .st-key-login_card div.stFormSubmitButton > button:hover {{ background: #DC2626; color: #fff; }}
 .ac-card-help {{ color: {GREY}; font-size: 12.5px; margin-top: 18px; padding-top: 16px; border-top: 1px solid #F1F5F9; }}
 .ac-card-help b {{ color: {NAVY}; font-weight: 500; }}
+.ac-showpw {{ display: inline-flex; align-items: center; gap: 8px; color: {GREY}; font-size: 13.5px; cursor: pointer;
+              user-select: none; margin: 2px 0 4px; }}
+.ac-showpw input {{ width: 16px; height: 16px; accent-color: {RED}; cursor: pointer; margin: 0; }}
+.stApp:has(#ac-showpw:checked) .st-key-access_code input {{ -webkit-text-security: none; text-security: none;
+                                                             letter-spacing: normal; }}
 @media (max-width: 700px) {{
   .ac-lp {{ display: none; }}
   .block-container {{ padding-top: 3vh !important; }}
@@ -185,6 +190,12 @@ def login_card_head():
         f'<div class="ac-card-head"><img src="{LOGO_URL}" alt="Acumen M&amp;A Advisors">'
         '<h2>Sign in</h2><p>Enter the team password to continue.</p></div>',
         unsafe_allow_html=True)
+
+
+def show_password_toggle():
+    """A plain HTML tick box; CSS (:has) unmasks the password box while it is ticked. No rerun, nothing sent."""
+    st.markdown('<label class="ac-showpw" for="ac-showpw"><input type="checkbox" id="ac-showpw"> Show password</label>',
+                unsafe_allow_html=True)
 
 
 def login_card_help():

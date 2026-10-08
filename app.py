@@ -1,0 +1,319 @@
+"""
+Commonsize web app (Streamlit).
+
+    streamlit run app.py        # set APP_PASSWORD first
+
+Upload a company's financials (digital PDF, scanned PDF, or a structured Excel
+sheet), review what was read, and download a Common Size workbook built on the
+firm's Reference file. Everything is rule-based; no AI service is called.
+"""
+
+import hmac
+import os
+import tempfile
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+from config.schedule_map import FY_COLUMN_MAP
+from core import pipeline
+from core.routing import all_placeable_schedules, schedule_for
+from core.workbook_reader import merge_new_year, read_workbook
+
+st.set_page_config(page_title="Commonsize", page_icon=None, layout="wide")
+
+NOT_PLACED = "(not placed)"
+
+
+# ----------------------------------------------------------------------------- password gate
+def _gate():
+    expected = os.environ.get("APP_PASSWORD", "")
+    if not expected:
+        st.error("APP_PASSWORD is not set on the server, so the app is locked. Ask the administrator to set it.")
+        st.stop()
+    if st.session_state.get("authed"):
+        return
+    st.title("Commonsize")
+    entered = st.text_input("Password", type="password")
+    if entered and hmac.compare_digest(entered.encode(), expected.encode()):
+        st.session_state["authed"] = True
+        st.rerun()
+    elif entered:
+        st.error("Incorrect password.")
+    st.stop()
+
+
+# ----------------------------------------------------------------------------- helpers
+def _fmt(value):
+    return f"{value:,.2f}"
+
+
+def _review_table(items, fy_cols, mult, unit_label, key):
+    """Editable table of line items; returns the items after the user's edits (excluded rows removed)."""
+    options = [NOT_PLACED] + all_placeable_schedules()
+    rows = []
+    for item in items:
+        row = {
+            "Include": True,
+            "Line item": item.line_item,
+            "Place under": schedule_for(item) or NOT_PLACED,
+            "New (yellow)": item.is_new,
+            "PDF heading": item.pdf_heading,
+            "Page": item.pdf_page or None,
+            "Flags": ", ".join(f for f in item.flags if f != "ocr"),
+        }
+        for fy in fy_cols:
+            v = item.fy_values.get(fy)
+            row[fy] = None if v is None else v / mult
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    st.caption(f"Amounts are shown in {unit_label}. Correct any misread figure, choose a different schedule in "
+               "'Place under', or untick Include. The balance check below updates as you edit.")
+    edited = st.data_editor(
+        df, key=key, hide_index=True, width="stretch", num_rows="fixed",
+        column_config={
+            "Place under": st.column_config.SelectboxColumn(options=options, required=True),
+            "Include": st.column_config.CheckboxColumn(),
+            **{fy: st.column_config.NumberColumn(format="%.2f") for fy in fy_cols},
+        },
+        disabled=["New (yellow)", "PDF heading", "Page", "Flags"],
+    )
+    final = []
+    for item, (_, row) in zip(items, edited.iterrows()):
+        if not row["Include"]:
+            continue
+        chosen = row["Place under"]
+        if chosen != (schedule_for(item) or NOT_PLACED):
+            item.schedule_override = "" if chosen == NOT_PLACED else chosen
+        item.line_item = row["Line item"]
+        item.fy_values = {fy: (None if pd.isna(row[fy]) else float(row[fy]) * mult) for fy in fy_cols}
+        final.append(item)
+    return final
+
+
+def _balance_panel(items, fy_cols, mult, unit_label):
+    result = pipeline.check(items, fy_cols, mult)
+    st.subheader("Balance check")
+    if result.balanced:
+        st.success("The Balance Sheet tallies in every year.")
+    else:
+        st.error("The Balance Sheet does not tally. The gap below is real, not rounded away; "
+                 "look for a misread figure, a missing line, or an item placed under the wrong schedule.")
+    st.dataframe(pd.DataFrame([{
+        "Year": y.fy,
+        f"Equity + borrowings ({unit_label})": _fmt(y.liabilities_side / mult),
+        f"Assets ({unit_label})": _fmt(y.assets_side / mult),
+        f"Gap ({unit_label})": _fmt(y.gap / mult),
+        f"Profit for the year ({unit_label})": _fmt(y.pat / mult),
+        "Status": "OK" if y.balanced else "Does not tally",
+    } for y in result.years]), hide_index=True, width="stretch")
+    if result.unplaced:
+        st.warning("Not placed under any schedule (excluded from the statements): "
+                   + ", ".join(i.line_item for i in result.unplaced))
+    if len(result.years) > 1 and not result.balanced:
+        st.caption("A profit misread in one year also shows up in the following years, because profit rolls into reserves.")
+    return result
+
+
+def _generate(items, fy_cols, company, equity, reported, file_name):
+    data, report = pipeline.build_workbook(items, fy_cols, company, equity or None, reported)
+    for line in report.log:
+        st.warning(line) if line.startswith("WARNING") else st.info(line)
+    new = report.new_rows
+    if new:
+        st.info(f"{len(new)} new line item(s) are highlighted yellow in the workbook (Sch. sheet): "
+                + ", ".join(p.label for p in new))
+    st.download_button("Download Common Size workbook", data, file_name=file_name,
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+
+
+UNIT_CHOICES = {"Rs. (whole rupees)": 1, "Rs. in '000": 1_000, "Rs. in lakhs": 100_000,
+                "Rs. in millions": 1_000_000, "Rs. in crores": 10_000_000}
+
+
+def _is_structured(raw):
+    """The older Statement / Line Item / Statement Tag / FY.. layout."""
+    import io
+
+    import openpyxl
+    try:
+        ws = openpyxl.load_workbook(io.BytesIO(raw), read_only=True).worksheets[0]
+        first = next(ws.iter_rows(max_row=1, values_only=True), ())
+        return any(str(c).strip().lower() == "line item" for c in first if c is not None)
+    except Exception:
+        return False
+
+
+def _read_input(upload, kind):
+    """-> dict(items, fy_cols, mult, unit, extraction|None, log)"""
+    raw = upload.getvalue()
+    if kind == "pdf":
+        bar = st.progress(0.0, text="Reading the PDF ...")
+        extraction, mapping = pipeline.read_pdf(raw, progress=lambda d, t, m: bar.progress(d / t, text=m))
+        bar.empty()
+    elif upload.name.lower().endswith(".csv") or _is_structured(raw):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / upload.name
+            path.write_bytes(raw)
+            items = pipeline.read_structured(path)
+        fys = sorted({fy for i in items for fy in i.fy_values}, key=lambda f: list(FY_COLUMN_MAP).index(f)
+                     if f in FY_COLUMN_MAP else 99)
+        return dict(items=items, fy_cols=fys, mult=1, unit="Rs. (whole rupees)", extraction=None, log=[])
+    else:
+        extraction, mapping = pipeline.read_excel(raw)
+    return dict(items=mapping.items, fy_cols=sorted(extraction.fy_columns), mult=extraction.unit_multiplier,
+                unit=extraction.unit_label, extraction=extraction, log=mapping.log + extraction.warnings)
+
+
+def _reconciliation_panel(extraction, items, fy_cols, mult, unit_label):
+    """Shows that the workbook's figures equal what the input itself prints, line by line."""
+    st.subheader("Reconciliation with the input file")
+    rows = pipeline.reconcile(extraction, items, fy_cols)
+    if not rows:
+        st.info("The input does not print totals that can be compared (for example an unreadable scan).")
+        return
+    bad = [r for r in rows if not r["ok"]]
+    if bad:
+        st.error(f"{len(bad)} figure(s) differ from the input. See the table; correct the figure in the review table above.")
+    else:
+        st.success("Every compared figure (revenue, total income, total expenses, PBT, tax, profit, balance-sheet totals) "
+                   "equals the input.")
+    st.dataframe(pd.DataFrame([{
+        "Year": r["year"], "Line": r["line"], f"Workbook ({unit_label})": _fmt(r["computed"] / mult),
+        f"Input ({unit_label})": _fmt(r["reported"] / mult), "Difference": _fmt(r["diff"] / mult),
+        "Match": "OK" if r["ok"] else "DIFFERS"} for r in rows]), hide_index=True, width="stretch")
+    src = pipeline.source_balance(extraction, fy_cols)
+    tol = pipeline.tolerance(extraction.unit_multiplier)
+    own = {fy: (a - b) for fy, (a, b) in src.items() if abs(a - b) > tol}
+    if own:
+        st.warning("The input's own Balance Sheet does not balance: " + "; ".join(
+            f"{fy}: total liabilities {src[fy][0] / mult:,.2f} vs total assets {src[fy][1] / mult:,.2f} "
+            f"(out by {d / mult:,.2f})" for fy, d in own.items())
+            + ". The workbook reproduces the input faithfully, so this difference shows in the Balance Sheet check. "
+              "It has to be corrected in the source financials; the app does not plug it.")
+
+
+def _suggestions(extraction, items, fy_cols):
+    found = pipeline.suggest_fixes(extraction, items, fy_cols)
+    if not found:
+        return
+    st.subheader("Suggested corrections")
+    st.write("Each figure below disagrees with its own note. Using the note's figure makes the year's profit equal "
+             "the profit the financials print, so it is very likely a misread.")
+    st.dataframe(pd.DataFrame([{"Line item": i.line_item, "Year": fy, "As read": _fmt(cur), "Per note": _fmt(alt)}
+                               for i, fy, cur, alt in found]), hide_index=True, width="stretch")
+    if st.button("Apply the suggested corrections"):
+        for item, fy, _, alt in found:
+            item.fy_values[fy] = alt
+            item.flags.append("corrected_from_note")
+        st.session_state["review_version"] = st.session_state.get("review_version", 0) + 1
+        st.rerun()
+
+
+# ----------------------------------------------------------------------------- app
+_gate()
+st.title("Commonsize")
+st.caption("Upload a company's financial statements and get the firm's Common Size workbook.")
+mode = st.radio("What would you like to do?", ["New common size", "Add a new financial year to an existing workbook"],
+                horizontal=True)
+
+existing = None
+if mode.startswith("Add"):
+    old = st.file_uploader("Existing common size workbook (generated by this app)", type=["xlsx"], key="old")
+    if old is None:
+        st.stop()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "existing.xlsx"
+            p.write_bytes(old.getvalue())
+            existing = read_workbook(p)
+    except ValueError as exc:
+        st.error(str(exc))
+        st.stop()
+    st.success(f"Read '{existing.company}' with years {', '.join(existing.fy_columns) or 'none'}.")
+
+kind_label = st.radio("Input file type", ["PDF (digital or scanned)", "Excel"], horizontal=True)
+kind = "pdf" if kind_label.startswith("PDF") else "excel"
+upload = st.file_uploader("Financial statements (Balance Sheet, Profit & Loss and Notes)",
+                          type=["pdf"] if kind == "pdf" else ["xlsx", "xlsm", "csv"], key=f"fin-{kind}")
+company = st.text_input("Company name", value=existing.company if existing else "")
+equity = st.text_input("Number of equity shares (optional)", value=existing.equity_shares if existing else "")
+
+if upload is None:
+    st.stop()
+
+sig = (kind, upload.name, upload.size)
+if st.session_state.get("sig") != sig:
+    st.session_state.pop("data", None)
+    st.session_state["sig"] = sig
+    st.session_state["review_version"] = 0
+if "data" not in st.session_state:
+    if st.button("Read the file", type="primary"):
+        try:
+            st.session_state["data"] = _read_input(upload, kind)
+        except Exception as exc:   # OCR missing, unreadable file ...
+            st.error(f"Could not read this file: {exc}")
+            st.stop()
+        st.rerun()
+    st.stop()
+
+data = st.session_state["data"]
+extraction = data["extraction"]
+
+if extraction is not None:
+    labels = list(UNIT_CHOICES)
+    current = next((l for l in labels if UNIT_CHOICES[l] == data["mult"]), labels[0])
+    chosen = st.selectbox(f"Unit of the figures (detected: {data['unit']})", labels, index=labels.index(current))
+    if UNIT_CHOICES[chosen] != data["mult"]:
+        data["items"] = pipeline.remap(extraction, UNIT_CHOICES[chosen]).items
+        data["mult"], data["unit"] = UNIT_CHOICES[chosen], chosen
+        st.session_state["review_version"] += 1
+        st.rerun()
+mult, unit = data["mult"], data["unit"]
+
+if extraction is not None:
+    with st.expander("What the reader found and checked"):
+        for line in data["log"] + extraction.checks:
+            st.write("- " + line)
+unsupported = [fy for fy in data["fy_cols"] if fy not in FY_COLUMN_MAP]
+if unsupported:
+    st.warning(f"{', '.join(unsupported)} is outside the template's years ({', '.join(FY_COLUMN_MAP)}) and will not be written.")
+
+available = [fy for fy in data["fy_cols"] if fy in FY_COLUMN_MAP]
+if existing:
+    later = [fy for fy in available if not existing.fy_columns
+             or list(FY_COLUMN_MAP).index(fy) > list(FY_COLUMN_MAP).index(existing.fy_columns[-1])]
+    if not later:
+        st.error("The file has no year later than the latest year already in the workbook.")
+        st.stop()
+    new_fy = st.selectbox("Year to add", later)
+    review_cols = [new_fy]
+else:
+    default = available[-2:] if len(available) > 2 else available   # a third, older column is often only a partial comparative
+    review_cols = st.multiselect("Years to include", available, default=default)
+    if not review_cols:
+        st.stop()
+
+items = _review_table(data["items"], review_cols, mult, unit, key=f"review-{sig}-{st.session_state['review_version']}")
+reported_all = pipeline.reported_pat(extraction) if extraction is not None else {}
+
+if existing:
+    try:
+        merged, all_cols, reported, warns = merge_new_year(existing, items, new_fy, reported_all)
+    except ValueError as exc:
+        st.error(str(exc))
+        st.stop()
+    for w in warns:
+        st.warning(w)
+    _balance_panel(merged, all_cols, mult, unit)
+    _generate(merged, all_cols, company or existing.company, equity, reported,
+              f"{(company or existing.company)} - Common Size.xlsx")
+else:
+    if extraction is not None:
+        _suggestions(extraction, items, review_cols)
+    _balance_panel(items, review_cols, mult, unit)
+    if extraction is not None:
+        _reconciliation_panel(extraction, items, review_cols, mult, unit)
+    _generate(items, review_cols, company or "Company", equity,
+              {fy: v for fy, v in reported_all.items() if fy in review_cols}, f"{company or 'Company'} - Common Size.xlsx")

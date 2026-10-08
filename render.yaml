@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: commonsize
+    runtime: docker
+    plan: starter
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: APP_PASSWORD
+        sync: false   # enter the shared password in the Render dashboard; never commit it

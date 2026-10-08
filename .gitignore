@@ -1,0 +1,12 @@
+# client confidential material must never reach git
+client data/
+output/
+*.pkl
+*.ocr.txt
+Reference file/
+*backup*.xlsx
+.env
+__pycache__/
+*.pyc
+PROGRESS.md
+*.tmp

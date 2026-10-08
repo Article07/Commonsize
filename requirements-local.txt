@@ -1,0 +1,4 @@
+# Only needed on a Windows machine with Excel, to rebuild the template (tools/build_master_template.py)
+# and for the original command-line writer (main.py --use-template). Never installed on the server.
+-r requirements.txt
+pywin32>=306; sys_platform == "win32"

@@ -39,8 +39,9 @@ def _gate():
     ui.login_header()
     _, middle, _ = st.columns([1, 1.2, 1])
     with middle:
-        # "new-password" tells the browser's password manager not to fill in a saved password here
-        entered = st.text_input("Password", type="password", autocomplete="new-password")
+        # A plain text box, masked with dots by CSS (ui.py), so browser password managers neither fill in a
+        # saved password nor offer to create one; they only act on type="password" fields.
+        entered = st.text_input("Password", autocomplete="off", key="access_code")
     if entered and hmac.compare_digest(entered.encode(), expected.encode()):
         st.session_state["authed"] = True
         st.rerun()

@@ -56,6 +56,7 @@ html, body {{ overflow-x: hidden; }}
 
 .ac-foot {{ margin-top: 56px; padding-top: 16px; border-top: 1px solid #E5E5E5; color: {GREY}; font-size: 13px;
            display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }}
+.st-key-access_code input {{ -webkit-text-security: disc; text-security: disc; letter-spacing: .12em; }}
 .ac-login {{ max-width: 460px; margin: 40px auto 0; text-align: center; }}
 .ac-login img {{ height: 64px; margin-bottom: 18px; }}
 .ac-login h2 {{ color: {NAVY}; font-weight: 400; margin: 0 0 4px; }}

@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 
-OCR_SCALE = 300 / 72  # render at 300 DPI
+OCR_SCALE = float(os.environ.get("OCR_DPI", "300")) / 72  # render resolution for OCR
 
 _DEFAULT_TESSERACT_PATHS = [
     r"C:\Program Files\Tesseract-OCR\tesseract.exe",
@@ -130,45 +130,157 @@ def _ocr_image_lines(pytesseract, image):
     return lines, mean_conf
 
 
-def _ocr_page(pytesseract, pdf_page):
-    """OCR a page, trying 90/270/180 degree rotations if the upright read is poor."""
-    base = pdf_page.render(scale=OCR_SCALE).to_pil().convert("L")
+# Tesseract's Linux build runs OpenMP threads; inside a container with a fraction of a CPU those threads fight
+# over the quota and OCR becomes many times slower. One thread per Tesseract process is much faster there.
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
+
+_TRIAGE_SCALE = 150 / 72      # quick low-resolution look: orientation + page heading
+# pages that are not financial statements: auditor's report, CARO annexure, tax / filing covers
+_AUDITOR_PAGE = re.compile(r"independent\s+auditor|auditor.?s?\s+report|companies\s*\(\s*auditor|annexure\s*['\"]?\s*[ab]?\s*['\"]?\s*"
+                           r"(?:to|referred)|basis\s+for\s+opinion|key\s+audit\s+matters", re.I)
+_OTHER_PAGE = re.compile(r"chartered\s+accountants|assessment\s+year|acknowledg|computation\s+of\s+(?:total\s+)?income|"
+                         r"directors.?\s*report|board.?s\s+report|\bcaro\b", re.I)
+_STATEMENT_PAGE = re.compile(r"balance\s*sheet|profit\s*(?:and|&)\s*loss|notes?\s+to|forming\s+part|cash\s*flow|schedule",
+                             re.I)
+
+
+def _usable_cpus():
+    """CPUs this process may really use (a container's CPU quota, not the host's core count)."""
+    try:
+        quota, period = open("/sys/fs/cgroup/cpu.max").read().split()[:2]
+        if quota != "max":
+            return max(1, int(int(quota) / int(period)))
+    except Exception:
+        pass
+    try:
+        quota = int(open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read())
+        period = int(open("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read())
+        if quota > 0:
+            return max(1, quota // period)
+    except Exception:
+        pass
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except Exception:
+        return max(1, os.cpu_count() or 1)
+
+
+def _orientation(pytesseract, small):
+    """Counter-clockwise degrees that turn the page upright (Tesseract's orientation check), or None."""
+    try:
+        osd = pytesseract.image_to_osd(small, config="--psm 0 -c min_characters_to_try=10")
+    except Exception:
+        return None
+    rotate = re.search(r"Rotate:\s*(\d+)", osd)
+    return (360 - int(rotate.group(1))) % 360 if rotate else None
+
+
+def _heading_text(pytesseract, small):
+    """Text of the top part of the page, read at low resolution."""
+    top = small.crop((0, 0, small.width, int(small.height * 0.3)))
+    try:
+        return pytesseract.image_to_string(top, config="--psm 6")
+    except Exception:
+        return ""
+
+
+def _skip_reason(heading):
+    if _AUDITOR_PAGE.search(heading):
+        return "auditor's report"
+    if _OTHER_PAGE.search(heading) and not _STATEMENT_PAGE.search(heading):
+        return "not a financial statement"
+    return None
+
+
+def _good(lines, conf):
+    return conf >= 60 and len(lines) >= 4
+
+
+def _ocr_page(pytesseract, base, small):
+    """
+    OCR a page: upright first (most pages). Only if that reads poorly, ask Tesseract which way the page is
+    turned and read it once that way; if it cannot tell, try the other rotations, stopping at a good read.
+    """
     lines, conf = _ocr_image_lines(pytesseract, base)
     best = (lines, conf, 0)
-    if conf < 60 or len(lines) < 4:
-        for angle in (90, 270, 180):
-            rotated = base.rotate(angle, expand=True)
-            r_lines, r_conf = _ocr_image_lines(pytesseract, rotated)
-            if r_conf > best[1] + 5:
-                best = (r_lines, r_conf, angle)
+    if _good(lines, conf):
+        return best
+    angle = _orientation(pytesseract, small)
+    if angle == 0:
+        return best          # upright, just a faint or busy page: other rotations would not read better
+    order = ([angle] if angle is not None else []) + [a for a in (90, 270, 180) if a != angle]
+    for a in order:
+        r_lines, r_conf = _ocr_image_lines(pytesseract, base.rotate(a, expand=True))
+        if r_conf > best[1] + 5:
+            best = (r_lines, r_conf, a)
+        if _good(*best[:2]) and best[1] >= 70:
+            break
     return best
 
 
-def read_pages(pdf_source, progress=None, ocr=True):
+def _read_scanned_page(pytesseract, base, small, triage):
+    """-> (lines, confidence, rotation, skipped_reason, heading_is_statement)"""
+    if triage:
+        heading = _heading_text(pytesseract, small)
+        reason = _skip_reason(heading)
+        if reason:
+            return [], None, 0, reason, False
+    lines, conf, rot = _ocr_page(pytesseract, base, small)
+    return lines, conf, rot, None, None
+
+
+def read_pages(pdf_source, progress=None, ocr=True, triage=True):
     """
     pdf_source: path or bytes. progress: optional callable(done, total, message).
-    Returns list[PageText]. Pages with an embedded text layer are read directly;
-    image-only pages go through OCR.
+    Returns list[PageText]. Pages with an embedded text layer are read directly; image-only pages go through
+    OCR, in parallel when the machine has more than one usable CPU. Until the first financial statement page,
+    a quick look at each scanned page's heading recognises pages that are not financial statements (auditor's
+    report, CARO annexure, tax covers); those are not read in full.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     pdf = pdfium.PdfDocument(pdf_source)
     total = len(pdf)
-    pages = []
+    results = [None] * total
     pytesseract = None
-    for idx in range(total):
-        pdf_page = pdf[idx]
-        lines = _embedded_lines(pdf_page)
-        if sum(len(l) for l in lines) >= 80:
-            pages.append(PageText(idx + 1, lines, "text"))
-        elif ocr:
+    workers = _usable_cpus()
+    pending = {}
+    done = 0
+    statements_started = False
+
+    def finish(idx, outcome):
+        nonlocal done, statements_started
+        lines, conf, rot, skipped, _ = outcome
+        results[idx] = PageText(idx + 1, lines, "skipped" if skipped else "ocr", conf, rot)
+        if not skipped and classify_page(lines) in ("BS", "P&L", "NOTES", "CF"):
+            statements_started = True
+        done += 1
+        if progress:
+            note = f" (skipped: {skipped})" if skipped else ""
+            progress(done, total, f"Read page {idx + 1} of {total}{note}")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for idx in range(total):
+            pdf_page = pdf[idx]
+            lines = _embedded_lines(pdf_page)
+            if sum(len(l) for l in lines) >= 80 or not ocr:
+                results[idx] = PageText(idx + 1, lines, "text")
+                done += 1
+                if progress:
+                    progress(done, total, f"Read page {idx + 1} of {total}")
+                continue
             if pytesseract is None:
                 pytesseract = _configure_tesseract()
-            o_lines, conf, rot = _ocr_page(pytesseract, pdf_page)
-            pages.append(PageText(idx + 1, o_lines, "ocr", conf, rot))
-        else:
-            pages.append(PageText(idx + 1, lines, "text"))
-        if progress:
-            progress(idx + 1, total, f"Read page {idx + 1} of {total}")
-    return pages
+            # pdfium is not thread-safe: render here, OCR in the pool
+            base = pdf_page.render(scale=OCR_SCALE).to_pil().convert("L")
+            small = pdf_page.render(scale=_TRIAGE_SCALE).to_pil().convert("L")
+            pending[idx] = pool.submit(_read_scanned_page, pytesseract, base, small, triage and not statements_started)
+            while len(pending) >= workers:          # keep memory bounded; also lets triage stop early
+                first = min(pending)
+                finish(first, pending.pop(first).result())
+        for idx in sorted(pending):
+            finish(idx, pending[idx].result())
+    return results
 
 
 # --------------------------------------------------------------------------

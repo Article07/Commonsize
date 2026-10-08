@@ -6,6 +6,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# One OpenMP thread per Tesseract process: with a fractional CPU quota, Tesseract's default threading makes
+# OCR many times slower (threads spin and get throttled). Pages are OCR'd in parallel by the app instead,
+# one process per usable CPU.
+ENV OMP_THREAD_LIMIT=1
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

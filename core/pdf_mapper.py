@@ -28,7 +28,7 @@ not in the taxonomy can be placed "exactly as the PDF classifies it".
 import re
 from dataclasses import dataclass, field, replace
 
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process
 
 from core.models import LineItem
 from core.resolver import resolve
@@ -36,10 +36,25 @@ from core.routing import schedule_for
 
 TOL = 0.05
 _SUMMARY_LINE = re.compile(
-    r"earning|per\s*equity\s*share|exceptional|extraordinary|profit|loss\b|net\s*worth|^(?:basic|diluted)|^total\b"
-    r"|ebitda|\bratio\b|%\s*$",
+    r"earning|per\s*equity\s*share|exceptional|extraordinary|profit|loss\b|net\s*worth|^(?:basic|diluted)|^total\b(?!\s*outstanding)"
+    r"|ebitda|\bratio\b|%\s*$"
+    # the same lines with OCR typos ("PROAIT BEFORE TAX", "(2) DUTED", "Wl, TOTAL REVENUE")
+    r"|before\s+tax\b|\bbasic\b|\b(?:diluted|duted|diuted|dlluted)\b|\btotal\s+(?:revenue|income|expenses?)\b"
+    r"|dinary\s+items",          # (extra)ordinary items, also as OCR misreads it ("CATRACRDINARY ITEMS")
     re.I,
 )
+# standard Schedule III line names: a face line whose name OCR garbled ("REVEMUE FROM OPERATIONS") is matched to these
+_CANONICAL_LINES = [
+    "revenue from operations", "other income", "cost of materials consumed", "purchases of stock in trade",
+    "changes in inventories of finished goods work in progress and stock in trade", "employee benefits expense",
+    "finance costs", "depreciation and amortization expense", "other expenses", "current tax", "deferred tax",
+    "share capital", "long term borrowings", "short term borrowings", "trade payables", "other current liabilities",
+    "short term provisions", "long term provisions", "other long term liabilities", "property plant and equipment",
+    "intangible assets", "capital work in progress", "non current investments", "current investments",
+    "long term loans and advances", "short term loans and advances", "inventories", "trade receivables",
+    "cash and cash equivalents", "other current assets", "other non current assets",
+]
+_SCALES = (1, 1 / 1000, 1 / 100000, 1 / 10000000, 1000)
 _RESERVES = re.compile(r"reserves?\s*(?:and|&)\s*surplus", re.I)
 # the year's profit line in a reserves note: the template adds the P&L profit itself
 _PROFIT_LINE = re.compile(r"net\s*profit|profit\s*for|profit\s*/\s*\(?loss\)?|closing", re.I)
@@ -99,14 +114,28 @@ def _absorb_implicit_total(group, fy_columns=None):
         group.items = above
 
 
+def _plain(text):
+    """Lower-case words only, for comparing a statement line with a note title ("LONG-TERM ..." = "Long Term ...")."""
+    words = re.sub(r"[^a-z]+", " ", (text or "").lower()).split()
+    return " ".join(w for w in words if len(w) > 2 or w in ("of", "in", "to"))
+
+
 def _pick_group(groups, face_row):
     options = groups.get(face_row.note_ref, [])
-    if not options:
+    if options:
+        best = max(options, key=lambda g: fuzz.token_set_ratio(face_row.label.lower(), g.title.lower()))
+        if fuzz.token_set_ratio(face_row.label.lower(), best.title.lower()) >= 45:
+            return best
+    # note number missing or unreadable on a scanned statement ("a2" for 12): find the note by its title
+    label = re.sub(r"^[\W\da-z]{0,4}\s", "", face_row.label.lower()).strip()
+    label = re.sub(r"\s+\S{1,2}$", "", label)          # trailing OCR remnant of the note number
+    if len(label) < 6:
         return None
-    best = max(options, key=lambda g: fuzz.token_set_ratio(face_row.label.lower(), g.title.lower()))
-    if fuzz.token_set_ratio(face_row.label.lower(), best.title.lower()) < 45:
-        return None
-    return best
+    scored = sorted(((fuzz.ratio(label, g.title.lower().strip(" :.")), g) for opts in groups.values() for g in opts),
+                    key=lambda t: -t[0])
+    if scored and scored[0][0] >= 88 and (len(scored) == 1 or scored[1][0] < scored[0][0] - 5):
+        return scored[0][1]
+    return None
 
 
 def _sum_for(items, fy):
@@ -122,25 +151,58 @@ def _reference_values(face_row, group, fy_columns):
     return None
 
 
-def _items_tie(items, reference, fy_columns):
+def _items_tie(items, reference, fy_columns, tol=TOL):
     compared = 0
     for fy in fy_columns:
         ref = reference.get(fy)
         if ref is None:
             continue
         compared += 1
-        if abs(_sum_for(items, fy) - ref) > TOL:
+        if abs(_sum_for(items, fy) - ref) > tol:
             return False
     return compared > 0
 
 
-def _with_deductions(items, reference, fy_columns):
+def _scale_between(note_values, face_values, fy_columns):
+    """
+    Factor that turns a note's figures into the statement's unit. Statements in Rs. '000 with notes in
+    rupees and paise happen within one set of financials; the note's total tells which factor applies.
+    """
+    """Returns the factor, 1 when there is nothing to compare, None when no factor fits."""
+    pairs = [(note_values.get(fy), face_values.get(fy)) for fy in fy_columns]
+    pairs = [(n, f) for n, f in pairs if n not in (None, 0) and f not in (None, 0)]
+    if not pairs:
+        return 1
+    for s in _SCALES:
+        tight = sum(1 for n, f in pairs if abs(n * s - f) <= max(TOL, 0.6 if s < 1 else TOL, 0.002 * abs(f)))
+        # one year agreeing exactly is enough, as long as no year is wildly off (an OCR-misread digit is not)
+        if tight >= 1 and all(abs(n * s - f) <= 0.1 * abs(f) for n, f in pairs):
+            return s
+    return None
+
+
+def _rescaled(group, scale):
+    if scale == 1 or group is None:
+        return group
+    def sc(r):
+        return replace(r, values={k: (v * scale if v is not None else None) for k, v in r.values.items()},
+                       flags=list(r.flags) + ["note_in_other_unit"])
+    return NoteGroup(group.note_no, group.title, [sc(r) for r in group.items], sc(group.total) if group.total else None)
+
+
+def _note_reference_values(group, fy_columns):
+    if group.total is not None and _has_values(group.total):
+        return group.total.values
+    return {fy: _sum_for(group.items, fy) for fy in fy_columns}
+
+
+def _with_deductions(items, reference, fy_columns, tol=TOL):
     """
     Note lines such as "Less: Branch Transfer 6,326,463" are printed as positive figures but are deducted.
     If the note does not add up as printed but does once its "Less" lines are subtracted, use that.
     Returns the items to use (deducted lines negated), or None if neither version ties.
     """
-    if _items_tie(items, reference, fy_columns):
+    if _items_tie(items, reference, fy_columns, tol):
         return items
     adjusted = []
     for r in items:
@@ -148,7 +210,7 @@ def _with_deductions(items, reference, fy_columns):
             r = replace(r, values={fy: (-abs(v) if v is not None else None) for fy, v in r.values.items()},
                         flags=list(r.flags) + ["deduction"])
         adjusted.append(r)
-    return adjusted if _items_tie(adjusted, reference, fy_columns) else None
+    return adjusted if _items_tie(adjusted, reference, fy_columns, tol) else None
 
 
 def _scaled(values, fy_columns, multiplier):
@@ -171,6 +233,15 @@ def _tidy(label):
 def _make_item(label, values, statement, heading, source, page, flags, fy_columns, multiplier, resolve_label=None):
     label = _tidy(label)
     res = resolve(resolve_label or label, heading, statement)
+    if source == "pdf-face" and (not res.resolved or res.via == "heading"):
+        # a statement line whose name OCR garbled ("(7) OLHER CURRENT ASSEIS ly"): match it to the standard
+        # Schedule III names; its own name, read this way, beats a guess from the section heading
+        plain = re.sub(r"[^a-z ]", " ", label.lower())
+        plain = re.sub(r"^\s*(?:[ivxl]{1,4}|[a-h])\s+", "", re.sub(r"\s+", " ", plain)).strip()
+        plain = re.sub(r"(?:\s+[a-z]{1,2})+$", "", plain)        # trailing remnant of a note number
+        best = process.extractOne(plain, _CANONICAL_LINES, scorer=fuzz.ratio)
+        if best and best[1] >= 85:
+            res = resolve(best[0], heading, statement)
     li = LineItem(
         statement=statement,
         line_item=label,
@@ -249,13 +320,25 @@ def _side_rules(item, statement, label, assets_side):
     return item
 
 
-def _map_reserves(groups, fy_columns, multiplier, result):
+def _is_digital(group):
+    rows = group.items + ([group.total] if group.total is not None else [])
+    return bool(rows) and not any("ocr" in r.flags for r in rows)
+
+
+def _map_reserves(groups, fy_columns, multiplier, result, face_reserves=None, note_scale=1):
     found = False
     for options in groups.values():
         for g in options:
             if not _RESERVES.search(g.title):
                 continue
             found = True
+            # the reserves note may be in rupees while the balance sheet is in thousands
+            scale = None
+            if face_reserves is not None:
+                closing = next((r for r in reversed(g.items) if re.search(r"closing", r.label, re.I) and _has_values(r)), None)
+                basis = g.total.values if (g.total is not None and _has_values(g.total)) else (closing.values if closing else {})
+                scale = _scale_between(basis, face_reserves.values, fy_columns)
+            g = _rescaled(g, scale if scale is not None else note_scale)
             less_sign = _less_sign(g, fy_columns)
             for r in g.items:
                 low = r.label.lower()
@@ -296,9 +379,54 @@ def map_extraction(extraction, unit_multiplier=None):
     groups = _build_groups(note_rows)
     parents_with_children = {r.heading for r in face if _has_values(r) and not r.note_ref}
 
-    _map_reserves(groups, fy, mult, result)
+    # the unit of the notes relative to the statements (Rs. against Rs. '000 ...), learnt where both are readable
+    found = []
+    for F in face:
+        g = _pick_group(groups, F) if F.note_ref else None
+        if g is not None and _has_values(F):
+            nv = _note_reference_values(g, fy)
+            if not any(nv.get(y) and F.values.get(y) for y in fy):
+                continue                  # nothing to compare (nil lines say nothing about the unit)
+            s = _scale_between(nv, F.values, fy)
+            if s is not None:
+                found.append(s)
+    note_scale = max(set(found), key=found.count) if found else 1
+
+    face_reserves = next((r for r in face if r.statement == "BS" and _RESERVES.search(r.label) and _has_values(r)), None)
+    _map_reserves(groups, fy, mult, result, face_reserves, note_scale)
 
     assets_side, seen_total = None, False   # where on the balance sheet the line sits
+    replaced_parents = set()
+    # a heading printed without figures ("TRADE PAYABLES 8") whose scanned sub-lines carry the figures: when its
+    # note is digital, its sub-lines do not add up to the note but the note's own lines do, use the note's lines
+    for heading in dict.fromkeys(r.heading for r in face if r.statement == "BS" and r.heading):
+        children = [r for r in face if r.heading == heading and _has_values(r) and not r.note_ref and "ocr" in r.flags]
+        if not children or any(r.label == heading and _has_values(r) for r in face):
+            continue
+        pseudo = replace(children[0], label=heading, note_ref=re.search(r"(\d{1,2})\W*$", heading).group(1)
+                         if re.search(r"(\d{1,2})\W*$", heading) else "")
+        pg = _pick_group(groups, pseudo)
+        if pg is None or not _is_digital(pg) or pg.total is None or not _has_values(pg.total):
+            continue
+        child_sum = {y: _sum_for(children, y) for y in fy}
+        pg = _rescaled(pg, note_scale)
+        rounding = 0.5 * max(len(children), 1) + 0.5 if note_scale < 1 else TOL
+        if all(abs(child_sum[y] - (pg.total.values.get(y) or 0.0)) <= rounding for y in fy):
+            continue                       # the scanned sub-lines agree with the note: keep them
+        tol = TOL if note_scale == 1 else max(TOL, 0.5 * len(pg.items) + 0.5)
+        note_items = _with_deductions(pg.items, pg.total.values, fy, tol) if len(pg.items) >= 2 else None
+        lines = [r for r in (note_items or [pg.total]) if not _all_zero(r.values)]
+        for r in lines:
+            item = _make_item(r.label if note_items else pg.title, r.values, "BS", pg.title, "pdf-note", r.page,
+                              ["from_digital_note"], fy, mult)
+            if not item.statement_tag:
+                key = schedule_for(_make_item(pg.title, pg.total.values, "BS", heading, "pdf-face", r.page, [], fy, mult))
+                if key:
+                    item.schedule_override = key
+                    item.flags = [f for f in item.flags if f != "unplaced"]
+            result.items.append(item)
+        replaced_parents.add(heading)
+        result.log.append(f"{heading}: taken from Note {pg.note_no} (digital); the scanned sub-lines did not add up to it")
     for F in face:
         label = F.label
         if F.statement == "BS":
@@ -319,16 +447,66 @@ def map_extraction(extraction, unit_multiplier=None):
         has_vals = _has_values(F)
         if not has_vals and not F.note_ref:
             continue
+        if F.statement in ("BS", "P&L") and F.heading in replaced_parents and not F.note_ref:
+            continue          # a scanned sub-line whose heading was taken from its digital note instead
         if not has_vals and label in parents_with_children:
+            pg = _pick_group(groups, F)
+            if pg is not None and "ocr" in F.flags and _is_digital(pg) and pg.total is not None and _has_values(pg.total):
+                # the sub-lines are an OCR reading; the digital note is exact: use the note's lines
+                s = note_scale
+                children = [r for r in face if r.heading == label and _has_values(r) and r is not F]
+                child_sum = {y: _sum_for(children, y) for y in fy}
+                s = _scale_between(pg.total.values, child_sum, fy) or note_scale
+                pg = _rescaled(pg, s)
+                tol = TOL if s == 1 else max(TOL, 0.5 * len(pg.items) + 0.5)
+                note_items = _with_deductions(pg.items, pg.total.values, fy, tol) if len(pg.items) >= 2 else None
+                lines = [r for r in (note_items or [pg.total]) if not _all_zero(r.values)]
+                key_item = _side_rules(_make_item(label, pg.total.values, F.statement, F.heading, "pdf-face", F.page, [],
+                                                  fy, mult), F.statement, label, assets_side)
+                for r in lines:
+                    item = _make_item(r.label if note_items else label, r.values, F.statement, pg.title, "pdf-note",
+                                      r.page, ["from_digital_note"], fy, mult)
+                    if schedule_for(key_item) and schedule_for(item) != schedule_for(key_item):
+                        item.schedule_override = schedule_for(key_item)
+                        item.flags = [f for f in item.flags if f != "unplaced"]
+                    result.items.append(item)
+                replaced_parents.add(label)
+                result.log.append(f"{label}: taken from Note {pg.note_no} (digital) instead of the scanned sub-lines")
+                continue
             result.skipped.append((label, "parent line; its sub-lines carry the figures"))
             continue
 
-        group = _pick_group(groups, F) if F.note_ref else None
+        group = _pick_group(groups, F)        # by note number, or by title when the number is unreadable
+        scale = 1
+        if group is not None:
+            scale = _scale_between(_note_reference_values(group, fy), F.values, fy)
+            if scale is None:
+                scale = note_scale          # the unit the notes use elsewhere in this document
+            group = _rescaled(group, scale)
         heading = F.heading
-        reference = _reference_values(F, group, fy)
         flags = list(F.flags)
+        same_note = group is not None and fuzz.token_set_ratio(_plain(label), _plain(group.title)) >= 75
+        if same_note and group.total is not None and "ocr" in F.flags and _is_digital(group):
+            # the statement is a scan but the note is digital text: the note's exact total beats an OCR reading
+            face_values, changed = dict(F.values), []
+            for y in fy:
+                nv, fv = group.total.values.get(y), face_values.get(y)
+                if fv == 0 or not nv:
+                    continue        # a Nil on either side says nothing reliable: never overwrite with it
+                if nv is not None and (fv is None or abs(fv - nv) > max(1.0 if scale < 1 else TOL, 0.002 * abs(nv))):
+                    face_values[y] = nv
+                    changed.append(y)
+            if changed:
+                flags.append("from_digital_note")
+                result.log.append(f"{label}: {', '.join(changed)} taken from Note {F.note_ref} (digital) instead of the scanned "
+                                  f"statement's reading")
+                F = replace(F, values=face_values)
+                has_vals = True
+        reference = _reference_values(F, group, fy)
+        # notes in rupees against statements in thousands: each note line was rounded, allow for that
+        tol = TOL if scale == 1 else max(TOL, 0.5 * len(group.items) + 0.5)
 
-        note_items = _with_deductions(group.items, reference, fy) if (group is not None and reference) else None
+        note_items = _with_deductions(group.items, reference, fy, tol) if (group is not None and reference) else None
         if group is not None and len(group.items) >= 2 and note_items is not None:
             # the statement line decides the schedule; a note item only chooses the row inside it, so an
             # "Interest from bank deposits" inside the Other Income note stays in Other Income
@@ -362,7 +540,15 @@ def map_extraction(extraction, unit_multiplier=None):
             label_for_resolve = f"Changes in inventories {label}" if under_inventory_change else None
             if not under_inventory_change and re.search(r"changes?\s*in\s*inventor", heading, re.I):
                 parent_heading = ""
-            item = _make_item(label, F.values, F.statement, parent_heading, "pdf-face", F.page,
+            face_values = dict(F.values)
+            if group is not None and group.total is not None:
+                # a statement figure OCR could not read is taken from the note's own total
+                missing = [y for y in fy if face_values.get(y) is None and group.total.values.get(y) is not None]
+                for y in missing:
+                    face_values[y] = group.total.values[y]
+                if missing:
+                    flags.append("value_from_note_total")
+            item = _make_item(label, face_values, F.statement, parent_heading, "pdf-face", F.page,
                               flags, fy, mult, resolve_label=label_for_resolve)
             _side_rules(item, F.statement, label, assets_side)
             if group is not None and group.total is not None:

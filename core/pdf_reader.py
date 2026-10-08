@@ -73,6 +73,7 @@ class ExtractionResult:
     pages: list               # list[PageText]
     checks: list              # human-readable check results / warnings
     warnings: list
+    whole_units: bool = False # figures printed without decimals (e.g. whole Rs. '000): rounding is a whole unit
 
 
 # --------------------------------------------------------------------------
@@ -97,11 +98,17 @@ def _configure_tesseract():
     return pytesseract
 
 
+# text some PDF printers stamp on every page; on a scanned page it would otherwise pass for a text layer
+_WATERMARK = re.compile(r"pdf\s*created\s*with|pdffactory|trial\s*version|unregistered|evaluation\s*(?:copy|version)|"
+                        r"created\s*(?:by|with)\s*\S*\s*(?:pdf|converter)|www\.\S*pdf\S*\.com|camscanner|scanned\s*(?:by|with)",
+                        re.I)
+
+
 def _embedded_lines(pdf_page):
-    """Text lines from the page's embedded text layer, grouped by vertical position."""
+    """Text lines from the page's embedded text layer, grouped by vertical position (printer watermarks removed)."""
     textpage = pdf_page.get_textpage()
     text = textpage.get_text_range() or ""
-    return [ln.strip() for ln in text.replace("\r", "\n").split("\n") if ln.strip()]
+    return [ln.strip() for ln in text.replace("\r", "\n").split("\n") if ln.strip() and not _WATERMARK.search(ln)]
 
 
 def _ocr_image_lines(pytesseract, image):
@@ -203,7 +210,13 @@ def _ocr_page(pytesseract, base, small):
     """
     lines, conf = _ocr_image_lines(pytesseract, base)
     best = (lines, conf, 0)
-    if _good(lines, conf):
+    if len(lines) >= 4 and conf < 70:
+        # a poor, speckled scan: a light median filter often reads it much better; keep it only if clearly so
+        from PIL import ImageFilter
+        d_lines, d_conf = _ocr_image_lines(pytesseract, base.filter(ImageFilter.MedianFilter(3)))
+        if d_conf >= conf + 5:
+            best = (d_lines, d_conf, 0)
+    if _good(*best[:2]):
         return best
     angle = _orientation(pytesseract, small)
     if angle == 0:
@@ -290,6 +303,10 @@ def read_pages(pdf_source, progress=None, ocr=True, triage=True):
 _MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
 
 
+_STATEMENT_TITLE = re.compile(r"BALANCE\s*SHE[EI]\w*\s*(?:AS|FOR)\b|STATEMENT\s*OF\s*PROFIT|PROFIT\s*(?:AND|&)\s*LOSS\s*"
+                              r"(?:STATEMENT|ACCOUNT)\s*(?:FOR|AS)\b", re.I)
+
+
 def classify_page(lines):
     head = re.sub(r"\s+", " ", " ".join(lines[:14]).upper())
     for line in lines[:10]:
@@ -299,9 +316,17 @@ def classify_page(lines):
             return "NOTES"
         if len(line) < 130 and re.match(r"^\W*NOTES?\s+(?:TO|FORMING|ON)\b", _clean(line), re.I):
             return "NOTES"
+    # a notes page that only carries the letterhead and then "NOTE 1 SHARE CAPITAL" / "NOTE 11 PROPERTY ..."
+    for line in lines[:16]:
+        text = _clean(line)
+        if len(text) < 130 and re.match(r"^\W*NOTE\s*(?:NO\.?\s*)?\d{1,2}[A-Z]?\b\s*[:.\-]?\s*"
+                                        r"(?!(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*[\s\-/.,]*\d)[A-Z(]",
+                                        text, re.I) \
+                and not _STATEMENT_TITLE.search(head):
+            return "NOTES"
     if "INDEPENDENT AUDITOR" in head:
         return "OTHER"
-    if "BALANCE SHEET" in head:
+    if re.search(r"BALANCE\s*SHE[EI]\w*", head):
         return "BS"
     if "PROFIT AND LOSS" in head or "PROFIT & LOSS" in head or "STATEMENT OF PROFIT" in head \
             or "INCOME STATEMENT" in head:
@@ -312,7 +337,9 @@ def classify_page(lines):
 
 
 _UNIT_PATTERNS = [
-    (re.compile(r"in\s+(?:rs\.?|inr|₹)?\s*in\s*['’`]?\s*000|in\s+thousands?|'000", re.I), 1_000, "Rs. in '000"),
+    # "Figures in ₹ Thousands" -- OCR often turns the rupee sign into %, ®, €, 3 ...
+    (re.compile(r"in\s+(?:rs\.?|inr|₹)?\s*in\s*['’`]?\s*000|\bi[na]\s+\S{0,3}\s*thousands?|'000|figures\s+in\s+.{0,4}thousand",
+                re.I), 1_000, "Rs. in '000"),
     (re.compile(r"in\s+(?:rs\.?\s*)?(?:lakhs?|lacs?)\b|in\s+rs\.?\s*in\s+lakhs?", re.I), 100_000, "Rs. in lakhs"),
     (re.compile(r"in\s+(?:rs\.?\s*)?crores?\b|in\s+rs\.?\s*in\s+crores?", re.I), 10_000_000, "Rs. in crores"),
     (re.compile(r"in\s+(?:rs\.?\s*)?(?:millions?|mn)\b", re.I), 1_000_000, "Rs. in millions"),
@@ -359,6 +386,19 @@ def detect_fy_columns(lines):
 
 _NOISE = re.compile(r"[|_\[\]{}~=]+|[^ -~]+")
 _DASHES = {"-", "–", "—", "nil", "Nil", "NIL"}
+# "Nil" as OCR tends to read it in a figures column
+_NIL_WORDS = {"nil", "nill", "nii", "nl", "mil", "hil", "wil", "pil", "nul", "nual", "mill", "rail", "mld", "na", "n.a.",
+              "nit", "ni", "nll", "n1l", "ml"}
+
+
+def _is_dash(tok):
+    return tok in _DASHES or tok.lower().strip(".,|:;") in _NIL_WORDS
+
+
+def _garbled_figure(tok):
+    """A token that is clearly a figure OCR could not read: mostly digits with a stray symbol ("$23", "1,7O8")."""
+    digits = sum(c.isdigit() for c in tok)
+    return digits >= 2 and digits >= len(tok.replace(",", "")) - 2 and not re.fullmatch(r"[\d,().-]+", tok)
 
 
 def _clean(text):
@@ -369,7 +409,7 @@ def _clean(text):
 def _parse_number(tok):
     """-> (value | None, flags). Dashes mean nil (0)."""
     flags = []
-    if tok in _DASHES:
+    if _is_dash(tok):
         return 0.0, flags
     t = tok
     negative = False
@@ -393,7 +433,7 @@ def _parse_number(tok):
 
 def _is_valuelike(tok, decimals2):
     """'value' | 'suspect' | 'dash' | 'int' | 'word'"""
-    if tok in _DASHES:
+    if _is_dash(tok):
         return "dash"
     core = tok[1:-1] if tok.startswith("(") and tok.endswith(")") else tok.lstrip("-")
     if not re.fullmatch(r"[\d,]*\d(?:\.\d+)?", core):
@@ -406,6 +446,23 @@ def _is_valuelike(tok, decimals2):
         # in a 2-decimal document a plain 3+ digit token has probably lost its decimal
         return "value" if "," in core and re.search(r",\d{2}$", core) else "suspect"
     return "value"
+
+
+def _page_uses_2_decimals(lines, document_default):
+    """Statements in thousands and notes in rupees-and-paise can sit in one PDF: decide per page when it is clear."""
+    two = other = 0
+    for line in lines:
+        for tok in _clean(line).split():
+            t = tok.strip("()")
+            if re.fullmatch(r"-?[\d,]*\d\.\d{2}", t):
+                two += 1
+            elif re.fullmatch(r"-?\d{1,3}(?:,\d{2,3})+", t):
+                other += 1
+    if two >= 6 and two >= 3 * other:
+        return True
+    if other >= 6 and other >= 3 * two:
+        return False
+    return document_default
 
 
 def _document_uses_2_decimals(all_lines):
@@ -421,7 +478,7 @@ def _document_uses_2_decimals(all_lines):
 
 
 _ENUMERATOR = re.compile(r"^(?:\(?[a-zA-Z]{1,4}[\)\}]|\(?[ivxlIVXL]{1,4}\)|[ivxlIVXL]{1,4}\s|[a-gA-G]\s(?=[A-Z]))\s*")
-_TOTAL = re.compile(r"^(?:grand\s+)?total\b", re.I)
+_TOTAL = re.compile(r"^(?:grand\s+)?total\b(?!\s*outstanding)", re.I)   # not "total outstanding dues of ..."
 _NOTE_HEADER = re.compile(
     r"^(?:(?i:note)\s*(?:(?i:no)\.?)?\s*)?((?=[0-9ilIoO]*\d)[0-9ilIoO]{1,2})(?:[.:\-]|\s)+(?:[0-9]{1,2}(?:[.:\-]|\s)+)?[\(\[\{]?\s*"
     r"([A-Za-z][A-Za-z &,/'()\.\-]{2,80}?)\s*:?\s*$"
@@ -449,6 +506,8 @@ def parse_line(line, ncols, decimals2, fy_columns):
             tok, _ = tok[1:], flags.append("bracket_noise")
         if len(tok) > 1 and tok[-1] in ".,;:" and tok[:-1].replace(",", "").replace(".", "").isdigit():
             tok = tok[:-1]
+        if not decimals2 and re.fullmatch(r"\(?-?\d{1,3}(?:[.,]\d{3})+\)?", tok) and "." in tok:
+            tok, _ = tok.replace(".", ","), flags.append("decimal_repaired")
         tokens.append(tok)
     peeled = []
     i = len(tokens)
@@ -471,9 +530,23 @@ def parse_line(line, ncols, decimals2, fy_columns):
             peeled.append(tokens[i - 1])
             flags.append("missing_decimal?")
             i -= 1
+        elif peeled and _garbled_figure(tokens[i - 1]):
+            # a figure OCR could not read ("$23" for 923) between other figures: keep its column, value unknown
+            peeled.append("?")
+            flags.append("unreadable_value")
+            i -= 1
+        elif not peeled and _garbled_figure(tokens[i - 1]) and i > 1 and _is_valuelike(tokens[i - 2], decimals2) in (
+                "value", "suspect", "int", "dash"):
+            peeled.append("?")
+            flags.append("unreadable_value")
+            i -= 1
         else:
             break
     peeled.reverse()
+    lone_ref = False
+    if len(peeled) == 1 and ncols >= 2 and re.fullmatch(r"\d{1,2}", peeled[0]) and i > 0:
+        # "(b) TRADE PAYABLES 8": a lone small number on a statement line is its note reference, not a figure
+        peeled, i, lone_ref = [], i + 1, True
     remainder = tokens[:i]
     extra_numeric = 0
     # a multi-column schedule (fixed assets, share counts ...): everything numeric to the right of the
@@ -493,7 +566,7 @@ def parse_line(line, ncols, decimals2, fy_columns):
         flags.append("multi_column_schedule")
 
     note_ref = ""
-    if remainder and re.fullmatch(r"\d{1,2}", remainder[-1]) and (peeled or decimals2) and len(remainder) > 1:
+    if remainder and re.fullmatch(r"\d{1,2}", remainder[-1]) and (peeled or decimals2 or lone_ref) and len(remainder) > 1:
         note_ref = remainder[-1]
         remainder = remainder[:-1]
 
@@ -541,6 +614,24 @@ def _repeated_header_lines(pages, zone=6, min_pages=3, similarity=82):
     return repeated
 
 
+_BODY_START = re.compile(r"BALANCE\s*SHE|PROFIT\s*(?:AND|&)\s*LOSS|STATEMENT\s*OF\s*PROFIT|INCOME\s*STATEMENT", re.I)
+_BODY_END = re.compile(r"^\W*(?:vide|as\s+per)\s+our\s+report|for\s+and\s+on\s+behalf|^\W*significant\s+accounting\s+polic"
+                       r"|^\W*the\s+accompanying\s+notes|^\W*notes?\s+(?:on|to)\s+(?:the\s+)?financial\s+statements\s+\d", re.I)
+
+
+# letterhead address on every page: "MUMBAI 400 083" -- a place name and an Indian PIN code, not a figure
+_ADDRESS_LINE = re.compile(r"^[A-Za-z][A-Za-z!|.\s]{2,25}\s+\d{3}\s?[0-9OoGgQ]{3}\W*$")
+
+
+def _statement_body(lines):
+    """Line numbers of a face statement's own content: from its title to the auditor's / directors' signatures."""
+    start = next((i for i, l in enumerate(lines) if _BODY_START.search(_clean(l))), None)
+    if start is None:
+        return range(len(lines))      # title not readable: keep everything rather than lose the statement
+    end = next((i for i in range(start + 1, len(lines)) if _BODY_END.search(_clean(lines[i]))), len(lines))
+    return range(start, end)
+
+
 def extract_rows(pages, fy_columns, decimals2):
     ncols = len(fy_columns) if fy_columns else 2
     rows = []
@@ -549,6 +640,7 @@ def extract_rows(pages, fy_columns, decimals2):
     parent = ""         # a valueless line that cites a note, e.g. "Trade Payables 7" -> its indented children
     note_title = ""
     current_note_no = ""
+    notes_are_worded = False   # the document heads its notes "NOTE 1 ..."
     for pg in pages:
         if pg.page_type == "OTHER":
             continue
@@ -564,7 +656,11 @@ def extract_rows(pages, fy_columns, decimals2):
                 "",
             )
             note_title = "Property, Plant and Equipments (fixed asset schedule)"
-        for raw in pg.lines:
+        body = _statement_body(pg.lines) if statement in ("BS", "P&L") else range(len(pg.lines))
+        page_decimals = _page_uses_2_decimals(pg.lines, decimals2)   # pages of one PDF can differ
+        for line_no, raw in enumerate(pg.lines):
+            if line_no not in body:
+                continue   # letterhead above the statement's title, signatures below it
             text = _clean(raw).lstrip(": .-")
             if not text or len(text) < 3:
                 continue
@@ -572,12 +668,17 @@ def extract_rows(pages, fy_columns, decimals2):
                 # checked before the skip list, which would otherwise drop "NOTE 2 : RESERVES & SURPLUS"
                 m = _NOTE_HEADER.match(text)
                 if m and not re.search(r"\d[\d,]*\.\d", text):
+                    worded = bool(re.match(r"^\W*note\b", text, re.I))
+                    if worded:
+                        notes_are_worded = True
+                    elif notes_are_worded:
+                        continue   # "1. Administrative & Other Expenses" inside NOTE 24: a sub-heading, not a note
                     current_note_no = _normalise_note_no(m.group(1))
                     note_title = m.group(2).strip(" :")
                     continue
-            if (pg.page, raw) in boilerplate or _SKIP_LINE.match(text):
+            if (pg.page, raw) in boilerplate or _SKIP_LINE.match(text) or _ADDRESS_LINE.match(text):
                 continue
-            label, note_ref, values, flags, n_vals = parse_line(raw, ncols, decimals2, fy_columns)
+            label, note_ref, values, flags, n_vals = parse_line(raw, ncols, page_decimals, fy_columns)
             if not label:
                 continue
             headingish = len(label) <= 70 and re.search(r"[A-Za-z]{3}", label) is not None \
@@ -586,6 +687,8 @@ def extract_rows(pages, fy_columns, decimals2):
                 if statement == "NOTE" or not headingish:
                     continue  # narrative text / noise
                 if not note_ref:
+                    if label[:1].islower():
+                        continue   # the wrapped second line of a long label ("small enterprises; and")
                     section, parent = label.strip(": "), ""
                     continue
                 parent = label.strip(": ")  # valueless line citing a note: keep it, it resolves via the note
@@ -698,6 +801,12 @@ def extract_from_pages(pages):
     """Shared by PDF and Excel input: page text -> rows, checks, units, financial years."""
     for pg in pages:
         pg.page_type = classify_page(pg.lines)
+    # a notes page that simply continues the previous one (no "NOTE n" at its top, e.g. the surplus part of
+    # the reserves note) still belongs to the notes
+    for prev, pg in zip(pages, pages[1:]):
+        figures = sum(1 for l in pg.lines if re.search(r"\d[\d,]{2,}|\bnil\b", l, re.I))
+        if pg.page_type == "OTHER" and prev.page_type == "NOTES" and pg.source != "skipped" and figures >= 3:
+            pg.page_type = "NOTES"
 
     warnings = []
     fy_columns = []
@@ -729,4 +838,10 @@ def extract_from_pages(pages):
     if not any(r.statement in ("BS", "P&L") for r in rows):
         warnings.append("No Balance Sheet or Profit & Loss page was recognised.")
 
-    return ExtractionResult(rows, fy_columns, multiplier, unit_label, pages, checks, warnings)
+    if any(r.statement == "BS" for r in rows) and not any(r.statement == "P&L" for r in rows):
+        warnings.append("This file has no Statement of Profit and Loss. Upload the next year's report as well: its "
+                        "comparative column supplies this year's profit and loss.")
+    # rounding follows how the statements themselves are printed (notes may carry paise while they do not)
+    face_lines = [ln for pg in pages if pg.page_type in ("BS", "P&L") for ln in pg.lines]
+    whole_units = not _document_uses_2_decimals(face_lines) if face_lines else not decimals2
+    return ExtractionResult(rows, fy_columns, multiplier, unit_label, pages, checks, warnings, whole_units=whole_units)

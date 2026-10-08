@@ -49,22 +49,36 @@ def reported_pat(extraction):
         if row.statement == "P&L" and _PAT_LABEL.search(row.label) and not re.search(r"before", row.label, re.I):
             if all(row.values.get(fy) is not None for fy in extraction.fy_columns):
                 return {fy: row.values[fy] * extraction.unit_multiplier for fy in extraction.fy_columns}
-    # the face line is sometimes unreadable in a scan; the reserves note repeats the same profit
-    for row in extraction.rows:
-        if row.statement == "NOTE" and re.search(r"net\s*profit|profit\s*for\s*the", row.label, re.I)                 and re.search(r"reserve|surplus", row.heading or "", re.I):
+    # the face line is sometimes unreadable in a scan; the reserves note repeats the same profit. The note can
+    # be in rupees while the statements are in thousands: its closing balance against the balance sheet's
+    # reserves line tells the factor.
+    from core.pdf_mapper import _RESERVES, _scale_between
+    reserves_note = [r for r in extraction.rows if r.statement == "NOTE" and re.search(r"reserve|surplus", r.heading or "", re.I)]
+    face_reserves = next((r for r in extraction.rows if r.statement == "BS" and _RESERVES.search(r.label)
+                          and any(v for v in r.values.values())), None)
+    closing = next((r for r in reversed(reserves_note) if re.search(r"closing|total", r.label, re.I)
+                    and any(v for v in r.values.values())), None)
+    scale = 1
+    if face_reserves is not None and closing is not None:
+        scale = _scale_between(closing.values, face_reserves.values, extraction.fy_columns) or 1
+    for row in reserves_note:
+        if re.search(r"net\s*profit|profit\s*for\s*the", row.label, re.I):
             if all(row.values.get(fy) is not None for fy in extraction.fy_columns):
-                return {fy: row.values[fy] * extraction.unit_multiplier for fy in extraction.fy_columns}
+                return {fy: row.values[fy] * scale * extraction.unit_multiplier for fy in extraction.fy_columns}
     return {}
 
 
-def tolerance(unit_multiplier):
-    """Rounding in the financials' own unit (two decimals) is not a failure."""
-    return max(1.0, 0.02 * unit_multiplier)
+def tolerance(unit_multiplier, whole_units=False):
+    """
+    Rounding in the financials' own unit is not a failure: two decimals of the unit when the figures carry
+    decimals, a couple of whole units when they are printed rounded (each line rounded to Rs. '000 adds up).
+    """
+    return max(1.0, (5.0 if whole_units else 0.02) * unit_multiplier)
 
 
-def check(items, fy_columns, unit_multiplier):
+def check(items, fy_columns, unit_multiplier, whole_units=False):
     fys = [fy for fy in sorted(fy_columns) if fy in FY_COLUMN_MAP]
-    return balance_check(items, fys, tolerance(unit_multiplier))
+    return balance_check(items, fys, tolerance(unit_multiplier, whole_units))
 
 
 def build_workbook(items, fy_columns, company, equity_shares=None, reported=None):
@@ -100,8 +114,8 @@ def reconcile(extraction, items, fy_columns):
     -> list of dict(year, line, computed, reported, diff, ok). Lines the input does not show are left out.
     """
     fys = [fy for fy in sorted(fy_columns) if fy in FY_COLUMN_MAP]
-    result = check(items, fys, extraction.unit_multiplier)
-    tol = tolerance(extraction.unit_multiplier)
+    result = check(items, fys, extraction.unit_multiplier, extraction.whole_units)
+    tol = tolerance(extraction.unit_multiplier, extraction.whole_units)
     pat = reported_pat(extraction)
     out = []
     for fy in fys:
@@ -149,12 +163,12 @@ def suggest_fixes(extraction, items, fy_columns):
     backed by evidence, never a guess: list of (item, fy, current, suggested).
     """
     pat = reported_pat(extraction)
-    tol = tolerance(extraction.unit_multiplier)
+    tol = tolerance(extraction.unit_multiplier, extraction.whole_units)
     found = []
     for fy in fy_columns:
         if fy not in pat:
             continue
-        base = check(items, fy_columns, extraction.unit_multiplier).statements[fy]["pat"]
+        base = check(items, fy_columns, extraction.unit_multiplier, extraction.whole_units).statements[fy]["pat"]
         if abs(base - pat[fy]) <= tol:
             continue
         for item in items:
@@ -164,7 +178,7 @@ def suggest_fixes(extraction, items, fy_columns):
             original = item.fy_values[fy]
             item.fy_values[fy] = alt
             try:
-                trial = check(items, fy_columns, extraction.unit_multiplier).statements[fy]["pat"]
+                trial = check(items, fy_columns, extraction.unit_multiplier, extraction.whole_units).statements[fy]["pat"]
             finally:
                 item.fy_values[fy] = original
             if abs(trial - pat[fy]) <= tol:

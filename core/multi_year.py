@@ -78,10 +78,28 @@ def combine(sources):
         showing = [i for i, s in enumerate(sources) if fy in s.fy_cols]
         owner[fy] = min(showing, key=lambda i: fy_key(sources[i].current))
 
+    # a year's Balance Sheet and P&L are each taken from the file where the year is current, if that file has
+    # that statement (some reports omit the P&L); otherwise from the nearest file that shows it as comparative
+    def has_figures(source, fy, statement):
+        return any(i.statement == statement and i.fy_values.get(fy) for i in source.items)
+
+    owner_by = {}
+    for fy in all_fys:
+        for statement in ("BS", "P&L"):
+            current = [i for i, s in enumerate(sources) if s.current == fy and has_figures(s, fy, statement)]
+            showing = [i for i, s in enumerate(sources) if has_figures(s, fy, statement)]
+            if current:
+                owner_by[(fy, statement)] = current[0]
+            elif showing:
+                owner_by[(fy, statement)] = min(showing, key=lambda i: fy_key(sources[i].current))
+                if fy in owner and sources[owner[fy]].current == fy:
+                    warnings.append(f"{sources[owner[fy]].name} has no {'Profit & Loss' if statement == 'P&L' else 'Balance Sheet'}"
+                                    f" figures for {fy}; they are taken from {sources[owner_by[(fy, statement)]].name}.")
+
     merged, order = {}, []
     for index, source in enumerate(sources):
-        years = [fy for fy in all_fys if owner[fy] == index]
         for item in source.items:
+            years = [fy for fy in all_fys if owner_by.get((fy, item.statement), owner[fy]) == index]
             values = {fy: item.fy_values.get(fy) for fy in years if item.fy_values.get(fy) is not None}
             if not values:
                 continue

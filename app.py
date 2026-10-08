@@ -110,8 +110,8 @@ def _review_table(items, fy_cols, mult, unit_label, key):
     return final
 
 
-def _balance_panel(items, fy_cols, mult, unit_label):
-    result = pipeline.check(items, fy_cols, mult)
+def _balance_panel(items, fy_cols, mult, unit_label, whole_units=False):
+    result = pipeline.check(items, fy_cols, mult, whole_units)
     worst = max((abs(y.gap) for y in result.years), default=0.0)
     ui.cards([
         ("Years checked", ", ".join(y.fy for y in result.years), ""),
@@ -235,7 +235,7 @@ def _reconciliation_panel(data, items, fy_cols, mult, unit_label):
             r["file"] = s.name
             rows.append(r)
         src = pipeline.source_balance(s.extraction, years)
-        tol = pipeline.tolerance(s.extraction.unit_multiplier)
+        tol = pipeline.tolerance(s.extraction.unit_multiplier, s.extraction.whole_units)
         own_gaps += [(s.name, fy, a, b) for fy, (a, b) in src.items() if abs(a - b) > tol]
     if not rows:
         st.info("The input does not print totals that can be compared (for example an unreadable scan).")
@@ -365,6 +365,8 @@ if readable:
                 st.session_state["review_version"] += 1
                 st.rerun()
 mult, unit = data["mult"], data["unit"]
+# figures printed in whole units (e.g. whole Rs. '000) get a whole-unit rounding allowance in the checks
+whole_units = any(s.extraction is not None and s.extraction.whole_units for s in sources)
 
 if len(sources) > 1:
     by_file = {}
@@ -419,12 +421,12 @@ if existing:
         _stop()
     for w in warns:
         st.warning(w)
-    _balance_panel(merged, all_cols, mult, unit)
+    _balance_panel(merged, all_cols, mult, unit, whole_units)
     _generate(merged, all_cols, company or existing.company, equity, reported,
               f"{(company or existing.company)} - Common Size.xlsx")
 else:
     _suggestions(data, items, review_cols)
-    _balance_panel(items, review_cols, mult, unit)
+    _balance_panel(items, review_cols, mult, unit, whole_units)
     _reconciliation_panel(data, items, review_cols, mult, unit)
     _generate(items, review_cols, company or "Company", equity, reported_all, f"{company or 'Company'} - Common Size.xlsx")
 ui.footer()

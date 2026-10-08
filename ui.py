@@ -124,5 +124,5 @@ def login_header():
 
 def footer():
     st.markdown('<div class="ac-foot"><span>Acumen M&amp;A Advisors LLP. Confidential: client financials are processed '
-                'on this server and are not stored.</span><span>Rule-based; no AI service is used.</span></div>',
+                'on this server and are not stored.</span></div>',
                 unsafe_allow_html=True)

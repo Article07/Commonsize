@@ -15,6 +15,7 @@ from core.pdf_mapper import map_extraction
 from core.pdf_reader import extract_financials
 from core.render_writer import write_workbook
 from core.resolver import resolve
+from core.routing import schedule_for
 
 TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "template" / "commonsize_template.xlsx"
 _PAT_LABEL = re.compile(r"profit\s*(?:/\s*\(?loss\)?\s*)?(?:for\s+the\s+(?:year|period)|after\s+tax)", re.I)
@@ -72,8 +73,10 @@ def tolerance(unit_multiplier, whole_units=False):
     """
     Rounding in the financials' own unit is not a failure: two decimals of the unit when the figures carry
     decimals, a couple of whole units when they are printed rounded (each line rounded to Rs. '000 adds up).
+    At least Rs. 10: workbooks kept in rupees carry paise-level float residue, and a reserves note's opening
+    balance can differ from last year's closing by a rupee or two.
     """
-    return max(1.0, (5.0 if whole_units else 0.02) * unit_multiplier)
+    return max(10.0, (5.0 if whole_units else 0.02) * unit_multiplier)
 
 
 def check(items, fy_columns, unit_multiplier, whole_units=False):
@@ -98,7 +101,7 @@ _FACE_LINES = [
     ("total_income", "Total income", "P&L", r"^total\s*(income|revenue)"),
     ("total_expenses", "Total expenses", "P&L", r"^total\s*expenses"),
     ("pbt", "Profit before tax", "P&L", r"^(?:net\s*)?profit\s*before\s*tax"),
-    ("tax", "Tax expense", "P&L", r"^total\s*tax|^tax\s*expense"),
+    ("tax", "Tax expense", "P&L", r"^total\s*tax|^tax\s*expense(?!.*discontinu)"),
 ]
 
 
@@ -108,18 +111,23 @@ def _face_total(extraction, statement, pattern, fy, skip=0):
     return hits[skip].values[fy] * extraction.unit_multiplier if len(hits) > skip else None
 
 
-def _below_total_expenses(extraction, fy):
+def _below_total(items, fy):
     """
-    Expenses a P&L deducts after its 'Total expenses' line and before profit before tax ('Less: Remuneration to
-    partners' under 'Net profit before partners' payment and tax'): the app counts them as expenses.
+    (other income, expenses, tax) of P&L items printed after 'Total expenses' and before profit before tax
+    (exceptional items, partners' remuneration): the statement's own Total income / Total expenses leave them out.
     """
-    rows = [r for r in extraction.rows if r.statement == "P&L"]
-    start = next((i for i, r in enumerate(rows) if re.search(r"^total\s*expenses", r.label, re.I)), None)
-    end = next((i for i, r in enumerate(rows) if re.search(r"^(?:net\s*)?profit\s*before\s*tax", r.label, re.I)), None)
-    if start is None or end is None or end <= start:
-        return 0.0
-    return sum(abs(r.values.get(fy) or 0.0) for r in rows[start + 1:end]
-               if re.match(r"^\W*less\b", r.label, re.I) and not r.is_total) * extraction.unit_multiplier
+    income = expenses = tax = 0.0
+    for item in items:
+        if item.statement != "P&L" or "below_total_expenses" not in item.flags:
+            continue
+        key, value = schedule_for(item), item.fy_values.get(fy) or 0.0
+        if key == "Other Income":
+            income += value
+        elif key == "Tax Expense":
+            tax += value
+        else:
+            expenses += value
+    return income, expenses, tax
 
 
 def reconcile(extraction, items, fy_columns):
@@ -134,17 +142,17 @@ def reconcile(extraction, items, fy_columns):
     out = []
     for fy in fys:
         s = result.statements[fy]
+        income_below, expenses_below, tax_below = _below_total(items, fy)
         computed = {
             "revenue": s["revenue"],
-            "total_income": s["revenue"] + s["other_income"],
-            "total_expenses": s["revenue"] + s["other_income"] - (s["operating_pbt"] + s["other_income"]),
-            "pbt": s["operating_pbt"] + s["other_income"],
-            "tax": s["tax"],
+            "total_income": s["revenue"] + s["other_income"] - income_below,
+            "total_expenses": s["revenue"] - s["operating_pbt"] - expenses_below,
+            # tax of earlier years printed above profit before tax is part of the app's tax expense
+            "pbt": s["operating_pbt"] + s["other_income"] - tax_below,
+            "tax": s["tax"] - tax_below,
         }
         for key, label, statement, pattern in _FACE_LINES:
             reported = _face_total(extraction, statement, pattern, fy)
-            if reported is not None and key == "total_expenses":
-                reported += _below_total_expenses(extraction, fy)
             if reported is not None:
                 out.append(dict(year=fy, line=label, computed=computed[key], reported=reported))
         if fy in pat:

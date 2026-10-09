@@ -36,7 +36,10 @@ _SECTION_TITLE = [
     ("BS", re.compile(r"^\W*balance\s*sheet\b", re.I)),
     ("P&L", re.compile(r"^\W*(?:statement\s+of\s+profit|profit\s*(?:and|&)\s*loss\s*(?:statement|account|a/c)?\W*$)", re.I)),
     ("CF", re.compile(r"^\W*(?:cash\s*flow\s*statement|statement\s+of\s+cash\s*flows?)\b", re.I)),
+    ("NOTES", re.compile(r"^\W*notes?\s+(?:annexed|forming|to\s+(?:and\s+forming|the\s+(?:financial|accounts)))", re.I)),
 ]
+# "Note No. :" (the number in the next cell, or after the colon)
+_NOTE_NO = re.compile(r"^note\s*(?:no\.?)?\s*[:.\-]?\s*(\d{1,2})?\s*[:.]?$", re.I)
 # printed-page furniture copied into the sheet: "(4)", "(Contd...5)"
 _PAGE_MARK = re.compile(r"^\(?\s*(?:\d{1,3}|contd\W*\d*)\s*\)?\W*$", re.I)
 # "2) Owners' Fund :" -- a note number written with a closing bracket
@@ -131,7 +134,10 @@ def _sheet_lines(rows, fy_order):
     header_idx, fy_cols, data_start = _find_columns(rows)
     if header_idx is None:
         return [], {}
-    lines, unit_seen = [], False
+    inner = _inner_columns(rows, header_idx, fy_cols)
+    if inner:
+        data_start = min([data_start] + list(inner.values()))
+    lines, unit_seen, pending_note = [], False, None
     for idx, row in enumerate(rows):
         if idx < header_idx:
             for v in row:
@@ -160,8 +166,20 @@ def _sheet_lines(rows, fy_order):
         else:
             label = _ENUMERATOR.sub("", label).strip()  # "a) Share Capital", "(iii) ...", "1.Shareholders Fund"
         small_ints = [int(v) for v in head if _is_number(v) and float(v).is_integer() and 0 < v < 100]
-        cols = [fy_cols.get(fy) for fy in (fy_order or sorted(fy_cols, reverse=True))]
-        values = [(_cell_value(row[c]) if c is not None and c < len(row) else None) for c in cols]
+        order = fy_order or sorted(fy_cols, reverse=True)
+        values = [_value_at(row, fy_cols.get(fy), inner.get(fy)) for fy in order]
+        note_no = _NOTE_NO.match(label)
+        if note_no and all(v is None for v in values):
+            # "Note No. : | 4" with the note's title on the next row
+            number = note_no.group(1) or (str(small_ints[0]) if len(small_ints) == 1 else None)
+            if number:
+                pending_note = number
+                continue
+        if pending_note and label and all(v is None for v in values):
+            lines.append(f"{pending_note}. {label}")
+            pending_note = None
+            continue
+        pending_note = None
         if all(v is None for v in values):
             if not label:
                 continue
@@ -178,6 +196,40 @@ def _sheet_lines(rows, fy_order):
     return lines, fy_cols
 
 
+def _value_at(row, col, inner_col):
+    """The cell value for a year; a line's figure in the year's inner column when the outer one is empty."""
+    value = _cell_value(row[col]) if col is not None and col < len(row) else None
+    if value is None and inner_col is not None and inner_col < len(row):
+        value = _cell_value(row[inner_col])
+    return value
+
+
+def _inner_columns(rows, header_idx, fy_cols):
+    """
+    {FY: column} of an unheaded amount column just left of a year column. Statements printed with two amount
+    columns per year put each line's figure in the inner column and only the group's subtotal under the year
+    ("Share Capital | 2,00,00,000 | " ... " | 4,94,69,354"). Recognised when several labelled rows have a
+    figure there (not a note number) and none under the year.
+    """
+    years = set(fy_cols.values())
+    out = {}
+    for fy, c in fy_cols.items():
+        ci = c - 1
+        if ci < 1 or ci in years:
+            continue
+        hits = 0
+        for row in rows[header_idx + 1:]:
+            if len(row) <= c or row[c] is not None:
+                continue
+            v = row[ci]
+            labelled = any(isinstance(x, str) and re.search(r"[A-Za-z]{3}", x) for x in row[:ci])
+            if labelled and _is_number(v) and not (float(v).is_integer() and 0 <= v < 100):
+                hits += 1
+        if hits >= 3:
+            out[fy] = ci
+    return out
+
+
 def _sections(rows):
     """
     The rows of one sheet split at each statement title ("BALANCE SHEET", "STATEMENT OF PROFIT & LOSS"), when
@@ -186,17 +238,17 @@ def _sections(rows):
     starts = []
     for idx, row in enumerate(rows):
         texts = [v.strip() for v in row if isinstance(v, str) and v.strip()]
-        if len(texts) != 1 or any(_is_number(v) for v in row) or len(texts[0]) > 60:
+        if len(texts) != 1 or any(_is_number(v) for v in row) or len(texts[0]) > 120:
             continue
         kind = next((k for k, pattern in _SECTION_TITLE if pattern.search(texts[0])), None)
         if kind and (not starts or starts[-1][1] != kind):
             starts.append((idx, kind))
     if len(starts) < 2:
-        return [rows]
+        return [(None, rows)]
     # the company name above a title belongs to that statement
     cuts = [max(0, i - 1) if i and any(isinstance(v, str) and v.strip() for v in rows[i - 1]) else i for i, _ in starts]
     cuts[0] = 0
-    return [rows[a:b] for a, b in zip(cuts, cuts[1:] + [len(rows)])]
+    return list(zip([k for _, k in starts], [rows[a:b] for a, b in zip(cuts, cuts[1:] + [len(rows)])]))
 
 
 def read_excel_pages(source):
@@ -208,11 +260,13 @@ def read_excel_pages(source):
         if ws.sheet_state != "visible":
             continue
         rows = [list(r) for r in ws.iter_rows(max_row=600, max_col=40, values_only=True)]
-        for part, section in enumerate(_sections(rows)):
+        for part, (title_kind, section) in enumerate(_sections(rows)):
             lines, fy_cols = _sheet_lines(section, None)
             if not lines:
                 continue
             kind = classify_page(lines)
+            if kind == "OTHER" and title_kind == "NOTES":
+                kind = "NOTES"
             if kind == "OTHER" and re.search(r"note|sch", ws.title, re.I) and any(re.match(r"^\W*note\s*\d", l, re.I) for l in lines):
                 kind = "NOTES"
             if kind != "OTHER":
@@ -237,7 +291,7 @@ def read_excel_pages(source):
     pages = []
     for page, s in enumerate(chosen, start=1):
         lines, _ = _sheet_lines(s["rows"], fy_order)
-        pages.append(PageText(page, lines, "text"))
+        pages.append(PageText(page, lines, "sheet", page_type=s["kind"]))
     return pages
 
 

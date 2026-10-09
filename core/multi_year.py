@@ -61,6 +61,37 @@ def _norm(text):
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
+_COMPANY = re.compile(r"(?:M/S\.?\s*)?([A-Z][A-Za-z0-9&.,'\- ]{2,80}?\s(?:private\s+limited|pvt\.?\s*ltd\.?|limited|ltd\.?|llp))\b",
+                      re.I)
+_LEGAL_FORM = re.compile(r"\b(?:private|pvt|limited|ltd|llp|m/s|the|company|co)\b\.?", re.I)
+
+
+def named_company(source):
+    """The company name a file's statements print at their top ("Lunkad Foods Private Limited"), else None."""
+    if source.extraction is None:
+        return None
+    for page in source.extraction.pages:
+        if page.page_type not in ("BS", "P&L"):
+            continue
+        for line in page.lines[:4]:
+            m = _COMPANY.search(line.replace("\n", " "))
+            if m:
+                return re.sub(r"\s+", " ", m.group(1)).strip()
+    return None
+
+
+def same_company(a, b):
+    """True when two company names are the same company ("Shirodkar Preci Comp Pvt Ltd" ~ "... Private Limited")."""
+    from rapidfuzz import fuzz
+    initials = lambda s: "".join(w[0] for w in re.findall(r"[A-Za-z]+", s or "")).lower()
+    if any(re.sub(r"[^a-z]", "", x.lower()) in (initials(y), initials(_LEGAL_FORM.sub(" ", y)))
+           for x, y in ((a, b), (b, a)) if x and len(x.split()) == 1):
+        return True                                         # "LFPL" for "Lunkad Foods Private Limited"
+    core = lambda s: re.sub(r"\s+", " ", _LEGAL_FORM.sub(" ", s or "")).strip().lower()
+    a, b = core(a), core(b)
+    return not a or not b or fuzz.token_set_ratio(a, b) >= 80
+
+
 def combine(sources):
     """-> Combined. sources: list[Source], in any order."""
     warnings = []

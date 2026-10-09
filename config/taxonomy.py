@@ -254,7 +254,9 @@ BS_ALIASES = [
 
 PNL_ALIASES = [
     (r"revenue\s*from\s*operations?|sale\s*of\s*(products?|goods|services)|^sales?\b|sales\s*manufactur", "tag", "Revenue", "Sale of goods"),
-    (r"other\s*income|discounts?\s*received|interest\s*(income|received)|miscellaneous\s*income", "category", "Other Income", "Miscellaneous Income"),
+    (r"other\s*income|discounts?\s*received|interest\s*(income|received)|miscellaneous\s*income"
+     r"|^\W*(?:add\W.{0,12})?(?:profit|gain)\W*(?:\(?loss\)?\W*)?on\s+(?:the\s+)?(?:sale|discard|disposal|redemption)"
+     r"|prior\s*period\s*income", "category", "Other Income", "Miscellaneous Income"),
     (r"changes?\s*in\s*inventor", "tag", "Change in Inventories", ""),
     (r"cost\s*of\s*(raw\s*)?materials?|materials?\s*consumed|purchases?\b|opening\s*stock|closing\s*stock", "category", "Direct Expenses / COGS", "Cost of raw materials"),
     (r"remuneration\s*to\s*(partners?|directors?)|(partners?|directors?)[\s'’]*remuneration|managerial\s*remuneration", "category", "Employee Benefit Expenses", "Directors remuneration"),

@@ -618,7 +618,7 @@ def _repeated_header_lines(pages, zone=6, min_pages=3, similarity=82):
 
 _BODY_START = re.compile(r"BALANCE\s*SHE|PROFIT\s*(?:AND|&)\s*LOSS|STATEMENT\s*OF\s*PROFIT|INCOME\s*STATEMENT", re.I)
 _BODY_END = re.compile(r"^\W*(?:vide|as\s+per)\s+our\s+report|for\s+and\s+on\s+behalf|^\W*significant\s+accounting\s+polic"
-                       r"|^\W*the\s+accompanying\s+notes|^\W*(?:net\s*)?(?:profit|surplus)\b.{0,30}(?:apportioned|divisible|distributed|credited)\s+(?:amongst|among|to)\s+(?:the\s+)?partners|^\W*notes?\s+(?:on|to)\s+(?:the\s+)?financial\s+statements\s+\d", re.I)
+                       r"|^\W*the\s+accompanying\s+notes|^\W*the\s+notes\s+referred\s+to|^\W*(?:net\s*)?(?:profit|surplus)\b.{0,30}(?:apportioned|divisible|distributed|credited)\s+(?:amongst|among|to)\s+(?:the\s+)?partners|^\W*notes?\s+(?:on|to)\s+(?:the\s+)?financial\s+statements\s+\d", re.I)
 
 
 # letterhead address on every page: "MUMBAI 400 083" -- a place name and an Indian PIN code, not a figure
@@ -802,7 +802,8 @@ def extract_financials(pdf_source, progress=None, ocr=True):
 def extract_from_pages(pages):
     """Shared by PDF and Excel input: page text -> rows, checks, units, financial years."""
     for pg in pages:
-        pg.page_type = classify_page(pg.lines)
+        if pg.page_type == "OTHER" or pg.source != "sheet":
+            pg.page_type = classify_page(pg.lines)   # a workbook section already knows its kind
     # a notes page that simply continues the previous one (no "NOTE n" at its top, e.g. the surplus part of
     # the reserves note) still belongs to the notes
     for prev, pg in zip(pages, pages[1:]):

@@ -291,6 +291,32 @@ def _hide_unused_years(wb, fy_columns):
             wb["CF"].column_dimensions[letters[i - 1]].hidden = not has_prior
 
 
+def _cash_flow_share_capital(wb, ws, fy_columns, report):
+    """
+    The template's cash flow finances only 'Changes in reserves' (reserves less profit); when share capital
+    changes between the years written (shares issued, preference shares redeemed) that line takes the change
+    in net worth instead, so the cash-flow check still closes.
+    """
+    row = ALL_SCHEDULES["Share Capital"]["first_item_row"]
+    capital = {fy: ws[f"{FY_COLUMN_MAP[fy]}{row}"].value or 0.0 for fy in fy_columns if fy in FY_COLUMN_MAP}
+    years = [fy for fy in FY_COLUMN_MAP if fy in capital]
+    if all(abs(capital[a] - capital[b]) < 0.5 for a, b in zip(years, years[1:])):
+        return
+    cf, bs = wb["CF"], wb["BS"]
+    reserves_row = next((r for r in range(1, 40) if re.match(r"reserves\s*and\s*surplus", str(bs.cell(r, 2).value or ""), re.I)), None)
+    net_worth_row = next((r for r in range(1, 40) if re.match(r"net\s*worth", str(bs.cell(r, 2).value or ""), re.I)), None)
+    for r in range(1, 60):
+        if re.match(r"changes\s*in\s*reserves", str(cf.cell(r, 2).value or ""), re.I) and reserves_row and net_worth_row:
+            cf.cell(r, 2).value = "Changes in share capital and reserves"
+            for c in range(3, 8):
+                cell = cf.cell(r, c)
+                if isinstance(cell.value, str):
+                    cell.value = re.sub(rf"(BS!\$?[A-Z]+\$?){reserves_row}\b", rf"\g<1>{net_worth_row}", cell.value)
+            report.log.append("NOTE: share capital changes between the years, so the cash flow's 'Changes in reserves' "
+                              "line also includes the change in share capital.")
+            return
+
+
 def write_workbook(template_path, output_path, company_name, line_items, fy_columns, equity_shares=None,
                    reported_pat=None):
     """
@@ -377,6 +403,7 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
     if equity_shares:
         ws[f"B{ALL_SCHEDULES['Share Capital']['first_item_row']}"].value = f"{equity_shares} equity shares of Rs. 10 each"
 
+    _cash_flow_share_capital(wb, ws, fy_columns, report)
     _hide_unused_years(wb, fy_columns)
     wb.calculation.fullCalcOnLoad = True   # openpyxl drops cached results; Excel recomputes on open
     wb.save(output_path)

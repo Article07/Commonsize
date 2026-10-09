@@ -43,6 +43,16 @@ _SUMMARY_LINE = re.compile(
     r"|dinary\s+items",          # (extra)ordinary items, also as OCR misreads it ("CATRACRDINARY ITEMS")
     re.I,
 )
+# real P&L items printed among the profit lines ("Exceptional items: Profit/(Loss) on sale of fixed assets",
+# "Extraordinary items: Add/(Less): Prior period incomes/(expenses)"), not subtotals
+_PNL_ITEM_BELOW = re.compile(
+    r"(?:profit|gain|loss)\W*(?:\(?(?:loss|gain)\)?\W*)?on\s+(?:the\s+)?(?:sale|discard|disposal|redemption)"
+    r"|prior\s*period|excess.{0,15}provision|provision.{0,10}tax|deferred\s*tax", re.I)
+# "Add: ..." / "Add/(Less): ..." in front of a P&L line
+_ADD_PREFIX = re.compile(r"^\W*add\s*(?:/\s*\(?\s*less\s*\)?)?\s*[:\-]*\s*", re.I)
+# the first direction word of a P&L line: group 1 = a positive figure adds to profit, group 2 = it reduces it
+_DIRECTION = re.compile(r"\b(?:(excess|assets?|incomes?(?!\W*tax)|profit|gain|savings?|credit|written\s*back|reversal)"
+                        r"|(short|liabilit\w*|expenses?|loss|charge))\b", re.I)
 # standard Schedule III line names: a face line whose name OCR garbled ("REVEMUE FROM OPERATIONS") is matched to these
 _CANONICAL_LINES = [
     "revenue from operations", "other income", "cost of materials consumed", "purchases of stock in trade",
@@ -254,6 +264,17 @@ def _make_item(label, values, statement, heading, source, page, flags, fy_column
         # "Less: Remuneration to partners" / "Less: Current tax" under a profit subtotal: an expense line like any
         # other, not a deduction within its schedule
         label = label[len("Less: "):]
+    income_signed = False
+    if source == "pdf-face" and statement == "P&L" and (
+            _ADD_PREFIX.match(label) or re.match(r"^\W*(?:profit|gain)\b", label, re.I) or res.tag == "Tax Expense"):
+        # the wording says which way a figure points: "Excess/(Short) provision of tax", "Deferred tax
+        # Asset/(Liability)", "Profit/(Loss) on sale of fixed assets" are additions to profit, so as an expense or
+        # tax (the taxonomy keeps 'Loss on sale of fixed asset' under administrative expenses) the sign turns over;
+        # "Short/(Excess) provision of tax", "Deferred tax Expenses/(Savings)" already are
+        first = _DIRECTION.search(label)
+        income_signed = (first is not None and first.group(1) is not None
+                         and res.tag not in ("Revenue",) and res.category not in ("Other Income",))
+        label = _ADD_PREFIX.sub("", label)
     li = LineItem(
         statement=statement,
         line_item=label,
@@ -268,6 +289,8 @@ def _make_item(label, values, statement, heading, source, page, flags, fy_column
         match_score=res.score,
         flags=list(flags),
     )
+    if income_signed:
+        li.fy_values = {fy: (-v if v else v) for fy, v in li.fy_values.items()}
     if res.known:
         li.confidence = "Matched"
     elif res.resolved:
@@ -481,8 +504,15 @@ def map_extraction(extraction, unit_multiplier=None):
             result.items.append(item)
         replaced_parents.add(heading)
         result.log.append(f"{heading}: taken from Note {pg.note_no} (digital); the scanned sub-lines did not add up to it")
+    # P&L lines printed after 'Total expenses' and before profit before tax (exceptional items, partners'
+    # remuneration): real items, but outside the statement's own Total income / Total expenses
+    pnl = [r for r in face if r.statement == "P&L"]
+    start = next((i for i, r in enumerate(pnl) if re.search(r"^total\s*expen", r.label, re.I)), None)
+    end = next((i for i, r in enumerate(pnl) if re.search(r"^(?:net\s*)?profit\s*before\s*tax", r.label, re.I)), None)
+    below_total = {id(r) for r in pnl[start + 1:end]} if start is not None and end is not None and end > start else set()
     for F in face:
         label = F.label
+        below_line = id(F) in below_total
         if F.statement == "BS":
             section = F.heading or ""
             if re.search(r"\bassets?\b", section, re.I):
@@ -495,7 +525,11 @@ def map_extraction(extraction, unit_multiplier=None):
                 seen_total = True
         if F.is_total or _RESERVES.search(label) or (F.statement == "BS" and _OWNERS_CAPITAL.search(label)):
             continue
-        if _SUMMARY_LINE.search(label) and not re.search(r"other\s*income", label, re.I):
+        # on the Balance Sheet a figure is an asset or a liability whatever its label (a workbook may mislabel
+        # "Long-Term Loans and Advances" as "Profit/(Loss) for the year"); only P&L subtotals are skipped
+        summary = (_SUMMARY_LINE.search(label) if (F.statement == "P&L" or not assets_side)
+                   else re.search(r"net\s*worth|\bratio\b|%\s*$|^total\b(?!\s*outstanding)|earning|per\s*equity\s*share", label, re.I))
+        if summary and not re.search(r"other\s*income", label, re.I) and not _PNL_ITEM_BELOW.search(label):
             result.skipped.append((label, "summary / per-share line"))
             continue
         has_vals = _has_values(F)
@@ -605,6 +639,8 @@ def map_extraction(extraction, unit_multiplier=None):
             item = _make_item(label, face_values, F.statement, parent_heading, "pdf-face", F.page,
                               flags, fy, mult, resolve_label=label_for_resolve)
             _side_rules(item, F.statement, label, assets_side)
+            if below_line:
+                item.flags.append("below_total_expenses")
             if group is not None and group.total is not None:
                 # the note's own total, kept as a possible correction when the face figure looks misread
                 for fy_ in fy:

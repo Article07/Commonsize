@@ -20,7 +20,7 @@ from config.schedule_map import FY_COLUMN_MAP
 import ui
 from core import pipeline
 from core.routing import all_placeable_schedules, schedule_for
-from core.multi_year import Source, combine, fy_key
+from core.multi_year import Source, combine, fy_key, named_company, same_company
 from core.workbook_reader import merge_new_years, read_workbook
 
 st.set_page_config(page_title="Acumen | Common Size Generator", page_icon=None, layout="wide")
@@ -376,6 +376,15 @@ if len(sources) > 1:
                + "; ".join(f"{', '.join(fys)} from {name}" for name, fys in by_file.items()) + ".")
 for w in data.get("warnings", []):
     st.warning(w)
+for s in sources:
+    if not s.fy_cols:
+        st.error(f"Nothing was taken from {s.name}: no year columns could be read in it.")
+names = {s.name: named_company(s) for s in sources}
+reference = company or next((n for n in names.values() if n), None)
+for s in sources:
+    if names[s.name] and reference and not same_company(names[s.name], reference):
+        st.error(f"{s.name} is the financials of '{names[s.name]}', not '{reference}'. "
+                 "Remove it if it belongs to another company.")
 with st.expander("What the reader found and checked"):
     for s in sources:
         if len(sources) > 1:

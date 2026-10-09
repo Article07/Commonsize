@@ -485,7 +485,9 @@ _NOTE_HEADER = re.compile(
 )
 _SKIP_LINE = re.compile(
     r"^(?:particulars|notes?|no\.?|sr\.?\s*no|\(refer|as per our report|for .* (?:&|and) co|"
-    r"chartered accountants|place|date|partners?|directors?|din|m\.?\s*no|f\.?r\.?\s*no|cin|"
+    r"chartered accountants|place|date|din|m\.?\s*no|f\.?r\.?\s*no|cin|"
+    # a signatory ("Partner", "Director (DIN ...)"), not "Partners current capital account" / "Directors remuneration"
+    r"(?:partners?|directors?)(?![\s'’]*(?:s\b)?[\s'’]*(?:fixed|current|capital|remuneration|salary|loans?|accounts?|a/c|fund))|"
     r"company information|the accompanying|significant accounting)(?=[\s:.;,)]|$)",
     re.I,
 )
@@ -616,7 +618,7 @@ def _repeated_header_lines(pages, zone=6, min_pages=3, similarity=82):
 
 _BODY_START = re.compile(r"BALANCE\s*SHE|PROFIT\s*(?:AND|&)\s*LOSS|STATEMENT\s*OF\s*PROFIT|INCOME\s*STATEMENT", re.I)
 _BODY_END = re.compile(r"^\W*(?:vide|as\s+per)\s+our\s+report|for\s+and\s+on\s+behalf|^\W*significant\s+accounting\s+polic"
-                       r"|^\W*the\s+accompanying\s+notes|^\W*notes?\s+(?:on|to)\s+(?:the\s+)?financial\s+statements\s+\d", re.I)
+                       r"|^\W*the\s+accompanying\s+notes|^\W*(?:net\s*)?(?:profit|surplus)\b.{0,30}(?:apportioned|divisible|distributed|credited)\s+(?:amongst|among|to)\s+(?:the\s+)?partners|^\W*notes?\s+(?:on|to)\s+(?:the\s+)?financial\s+statements\s+\d", re.I)
 
 
 # letterhead address on every page: "MUMBAI 400 083" -- a place name and an Indian PIN code, not a figure

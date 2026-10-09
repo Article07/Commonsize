@@ -336,8 +336,12 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
             report.placements.append(Placement(item.line_item, key, row, "special"))
             continue
 
-        row = _revenue_row(ws, sched, item) if key == "Revenue" else _match_row(
-            ws, sched, [item.matched_item, item.line_item], used_spares)
+        # a taxonomy match names the row; a heading / alias match only gives a fallback row, so the item's own
+        # label ("Staff Welfare" -> "Workers and staff welfare") is tried first
+        wanted = [item.matched_item, item.line_item]
+        if not item.match_score and _norm(item.line_item) not in GENERIC_FILLERS:
+            wanted.reverse()
+        row = _revenue_row(ws, sched, item) if key == "Revenue" else _match_row(ws, sched, wanted, used_spares)
         if row is not None:
             _add_values(ws, row, item, fy_columns, report)
             report.placements.append(Placement(item.line_item, key, row, "matched"))

@@ -97,7 +97,7 @@ _FACE_LINES = [
     ("revenue", "Revenue from operations", "P&L", r"^revenue\s*from\s*operations"),
     ("total_income", "Total income", "P&L", r"^total\s*(income|revenue)"),
     ("total_expenses", "Total expenses", "P&L", r"^total\s*expenses"),
-    ("pbt", "Profit before tax", "P&L", r"^profit\s*before\s*tax"),
+    ("pbt", "Profit before tax", "P&L", r"^(?:net\s*)?profit\s*before\s*tax"),
     ("tax", "Tax expense", "P&L", r"^total\s*tax|^tax\s*expense"),
 ]
 
@@ -106,6 +106,20 @@ def _face_total(extraction, statement, pattern, fy, skip=0):
     hits = [r for r in extraction.rows if r.statement == statement and re.search(pattern, r.label, re.I)
             and r.values.get(fy) is not None]
     return hits[skip].values[fy] * extraction.unit_multiplier if len(hits) > skip else None
+
+
+def _below_total_expenses(extraction, fy):
+    """
+    Expenses a P&L deducts after its 'Total expenses' line and before profit before tax ('Less: Remuneration to
+    partners' under 'Net profit before partners' payment and tax'): the app counts them as expenses.
+    """
+    rows = [r for r in extraction.rows if r.statement == "P&L"]
+    start = next((i for i, r in enumerate(rows) if re.search(r"^total\s*expenses", r.label, re.I)), None)
+    end = next((i for i, r in enumerate(rows) if re.search(r"^(?:net\s*)?profit\s*before\s*tax", r.label, re.I)), None)
+    if start is None or end is None or end <= start:
+        return 0.0
+    return sum(abs(r.values.get(fy) or 0.0) for r in rows[start + 1:end]
+               if re.match(r"^\W*less\b", r.label, re.I) and not r.is_total) * extraction.unit_multiplier
 
 
 def reconcile(extraction, items, fy_columns):
@@ -129,11 +143,13 @@ def reconcile(extraction, items, fy_columns):
         }
         for key, label, statement, pattern in _FACE_LINES:
             reported = _face_total(extraction, statement, pattern, fy)
+            if reported is not None and key == "total_expenses":
+                reported += _below_total_expenses(extraction, fy)
             if reported is not None:
                 out.append(dict(year=fy, line=label, computed=computed[key], reported=reported))
         if fy in pat:
             out.append(dict(year=fy, line="Profit for the year", computed=s["pat"], reported=pat[fy]))
-        liab, assets = (_face_total(extraction, "BS", r"^total$", fy, skip=k) for k in (0, 1))
+        liab, assets = (_face_total(extraction, "BS", r"^total\W*(?:rs\W*)?$", fy, skip=k) for k in (0, 1))
         total_liab = s["liabilities_side"] + s["current_liabilities"] + max(-s["deferred_tax_net"], 0.0)
         if liab is not None:
             out.append(dict(year=fy, line="Total equity and liabilities", computed=total_liab, reported=liab))
@@ -149,8 +165,8 @@ def source_balance(extraction, fy_columns):
     """{fy: (reported liabilities total, reported assets total)} for years where the input prints both."""
     out = {}
     for fy in fy_columns:
-        liab = _face_total(extraction, "BS", r"^total$", fy, skip=0)
-        assets = _face_total(extraction, "BS", r"^total$", fy, skip=1)
+        liab = _face_total(extraction, "BS", r"^total\W*(?:rs\W*)?$", fy, skip=0)
+        assets = _face_total(extraction, "BS", r"^total\W*(?:rs\W*)?$", fy, skip=1)
         if liab is not None and assets is not None:
             out[fy] = (liab, assets)
     return out

@@ -31,6 +31,16 @@ _HEADER_WORDS = re.compile(r"^(?:particulars|notes?|note\s*no\.?|no\.?|sr\.?\s*n
                            r"(?:\s+ended)?|amount|amt\.?|rs\.?|rupees|\(rupees\)|current\s+year|previous\s+year)\.?$", re.I)
 _ENUMERATOR = re.compile(r"^(?:\(?(?:[a-zA-Z]|[ivxIVX]{1,4})\)\s*|(?:[ivxIVX]{1,4}|\d{1,2})\.\s*|[a-zA-Z]\.\s+)+")
 _MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
+# a statement's own title row: where one sheet holds the Balance Sheet and the P&L one under the other
+_SECTION_TITLE = [
+    ("BS", re.compile(r"^\W*balance\s*sheet\b", re.I)),
+    ("P&L", re.compile(r"^\W*(?:statement\s+of\s+profit|profit\s*(?:and|&)\s*loss\s*(?:statement|account|a/c)?\W*$)", re.I)),
+    ("CF", re.compile(r"^\W*(?:cash\s*flow\s*statement|statement\s+of\s+cash\s*flows?)\b", re.I)),
+]
+# printed-page furniture copied into the sheet: "(4)", "(Contd...5)"
+_PAGE_MARK = re.compile(r"^\(?\s*(?:\d{1,3}|contd\W*\d*)\s*\)?\W*$", re.I)
+# "2) Owners' Fund :" -- a note number written with a closing bracket
+_NOTE_BRACKET = re.compile(r"^(\d{1,2})\s*\)\s*(?=[A-Za-z])")
 _PREFERRED_TITLE = re.compile(r"^\s*(bs|balance|b\s*/\s*s|p\s*&\s*l|pnl|profit|income|cash\s*flow|cf|notes?)\s*(sheet|statement)?\s*$",
                               re.I)
 
@@ -81,11 +91,12 @@ def _find_columns(rows):
     column and is skipped. The first row with two or more year columns wins; else the first with one.
     """
     fallback = None
-    for idx, row in enumerate(rows[:40]):
+    for idx, row in enumerate(rows):
         cand = {c: fy for c, v in enumerate(row) if (fy := _fy_of(v))}
-        if not cand:
-            continue
-        block = rows[max(0, idx - 2): idx + 3]
+        if not cand or (idx >= 40 and len(set(cand.values())) < 2):
+            continue                # past the top, only a two-year header counts (a notes sheet's first table)
+        # branch / state titles sit in heading rows; a label in a figures row ("Revenue from operations") is not one
+        block = [r for r in rows[max(0, idx - 2): idx + 3] if not any(_is_number(v) and _fy_of(v) is None for v in r)]
         named = {c for r in block for c, v in enumerate(r) if c >= 2 and _is_branch_name(v)}
         kept = {}
         for c in sorted(cand):
@@ -93,7 +104,7 @@ def _find_columns(rows):
                 kept.setdefault(cand[c], c)
         if not kept:
             continue
-        data_start = min(list(named) + list(kept.values()))
+        data_start = min([c for c in named if c > min(kept.values()) - 3] + list(kept.values()))
         if len(kept) >= 2:
             return idx, kept, data_start
         if fallback is None:
@@ -131,14 +142,23 @@ def _sheet_lines(rows, fy_order):
                         unit_seen = True
                     lines.append(v.strip())
             continue
-        if idx == header_idx:
-            years = [fy for fy in (fy_order or sorted(fy_cols, reverse=True)) if fy in fy_cols]
-            lines.append("Particulars Notes " + " ".join(f"31 Mar 20{fy[2:]}" for fy in years))
-            continue
         head = row[:data_start]
         label = " ".join(str(v).strip() for v in head if isinstance(v, str) and v.strip()
                          and v.strip().lower() not in _NIL and not v.strip().startswith("#"))
-        label = _ENUMERATOR.sub("", label).strip()      # "a) Share Capital", "(iii) ...", "1.Shareholders Fund"
+        if idx == header_idx:
+            years = [fy for fy in (fy_order or sorted(fy_cols, reverse=True)) if fy in fy_cols]
+            lines.append("Particulars Notes " + " ".join(f"31 Mar 20{fy[2:]}" for fy in years))
+            heading = _NOTE_BRACKET.sub(r"\1. ", label)
+            if heading != label and _fy_of(heading) is None:
+                lines.append(heading)      # "2) Owners' Fund :  31-3-2026  31-3-2025": the note starts on the header row
+            continue
+        if _PAGE_MARK.match(label) and not any(_is_number(v) for v in row[data_start:]):
+            continue
+        bracket = _NOTE_BRACKET.match(label)
+        if bracket:
+            label = f"{bracket.group(1)}. " + label[bracket.end():]
+        else:
+            label = _ENUMERATOR.sub("", label).strip()  # "a) Share Capital", "(iii) ...", "1.Shareholders Fund"
         small_ints = [int(v) for v in head if _is_number(v) and float(v).is_integer() and 0 < v < 100]
         cols = [fy_cols.get(fy) for fy in (fy_order or sorted(fy_cols, reverse=True))]
         values = [(_cell_value(row[c]) if c is not None and c < len(row) else None) for c in cols]
@@ -158,6 +178,27 @@ def _sheet_lines(rows, fy_order):
     return lines, fy_cols
 
 
+def _sections(rows):
+    """
+    The rows of one sheet split at each statement title ("BALANCE SHEET", "STATEMENT OF PROFIT & LOSS"), when
+    the sheet holds more than one statement; else the whole sheet. Each part keeps its own year header.
+    """
+    starts = []
+    for idx, row in enumerate(rows):
+        texts = [v.strip() for v in row if isinstance(v, str) and v.strip()]
+        if len(texts) != 1 or any(_is_number(v) for v in row) or len(texts[0]) > 60:
+            continue
+        kind = next((k for k, pattern in _SECTION_TITLE if pattern.search(texts[0])), None)
+        if kind and (not starts or starts[-1][1] != kind):
+            starts.append((idx, kind))
+    if len(starts) < 2:
+        return [rows]
+    # the company name above a title belongs to that statement
+    cuts = [max(0, i - 1) if i and any(isinstance(v, str) and v.strip() for v in rows[i - 1]) else i for i, _ in starts]
+    cuts[0] = 0
+    return [rows[a:b] for a, b in zip(cuts, cuts[1:] + [len(rows)])]
+
+
 def read_excel_pages(source):
     """source: path or bytes. One PageText per sheet that is a Balance Sheet, P&L, Cash Flow or Notes sheet."""
     handle = io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
@@ -167,14 +208,15 @@ def read_excel_pages(source):
         if ws.sheet_state != "visible":
             continue
         rows = [list(r) for r in ws.iter_rows(max_row=600, max_col=40, values_only=True)]
-        lines, fy_cols = _sheet_lines(rows, None)
-        if not lines:
-            continue
-        kind = classify_page(lines)
-        if kind == "OTHER" and re.search(r"note|sch", ws.title, re.I) and any(re.match(r"^\W*note\s*\d", l, re.I) for l in lines):
-            kind = "NOTES"
-        if kind != "OTHER":
-            sheets.append(dict(number=number, title=ws.title, kind=kind, rows=rows, fy_cols=fy_cols))
+        for part, section in enumerate(_sections(rows)):
+            lines, fy_cols = _sheet_lines(section, None)
+            if not lines:
+                continue
+            kind = classify_page(lines)
+            if kind == "OTHER" and re.search(r"note|sch", ws.title, re.I) and any(re.match(r"^\W*note\s*\d", l, re.I) for l in lines):
+                kind = "NOTES"
+            if kind != "OTHER":
+                sheets.append(dict(number=number + part / 10, title=ws.title, kind=kind, rows=section, fy_cols=fy_cols))
 
     chosen = []
     for kind in ("BS", "P&L", "CF"):
@@ -193,9 +235,9 @@ def read_excel_pages(source):
         return []
     fy_order = sorted(face["fy_cols"], key=lambda fy: face["fy_cols"][fy])
     pages = []
-    for s in chosen:
+    for page, s in enumerate(chosen, start=1):
         lines, _ = _sheet_lines(s["rows"], fy_order)
-        pages.append(PageText(s["number"], lines, "text"))
+        pages.append(PageText(page, lines, "text"))
     return pages
 
 

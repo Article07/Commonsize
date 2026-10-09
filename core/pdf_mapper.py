@@ -56,6 +56,13 @@ _CANONICAL_LINES = [
 ]
 _SCALES = (1, 1 / 1000, 1 / 100000, 1 / 10000000, 1000)
 _RESERVES = re.compile(r"reserves?\s*(?:and|&)\s*surplus", re.I)
+# a partnership's / proprietor's capital account that takes the year's profit (not a fixed capital account): it
+# rolls forward like Reserves & Surplus -- opening balance, partners' remuneration / interest / drawings, profit
+_OWNERS_CAPITAL = re.compile(r"(?:partners?|proprietors?|owners?)[\s'’s]*(?!fixed)(?:current\s*)?capital(?:\s*accounts?|\s*a/?c)?\b"
+                             r"|current\s*capital\s*accounts?", re.I)
+_OWNERS_NOTE = re.compile(r"owners?[\s'’]*s?\s*funds?|partners?[\s'’]*s?\s*capital|proprietor[\s'’]*s?\s*capital|capital\s*accounts?",
+                          re.I)
+_OPENING = re.compile(r"opening|as\s*per\s*(?:last|previous)\s*balance\s*sheet|balance\s*b\W*f|brought\s*forward", re.I)
 # the year's profit line in a reserves note: the template adds the P&L profit itself
 _PROFIT_LINE = re.compile(r"net\s*profit|profit\s*for|profit\s*/\s*\(?loss\)?|closing", re.I)
 # schedules that share one line of the income statement, so a note item may move between them
@@ -242,6 +249,11 @@ def _make_item(label, values, statement, heading, source, page, flags, fy_column
         best = process.extractOne(plain, _CANONICAL_LINES, scorer=fuzz.ratio)
         if best and best[1] >= 85:
             res = resolve(best[0], heading, statement)
+    if (source == "pdf-face" and statement == "P&L" and label.startswith("Less: ")
+            and res.tag not in ("Revenue",) and res.category not in ("Other Income",)):
+        # "Less: Remuneration to partners" / "Less: Current tax" under a profit subtotal: an expense line like any
+        # other, not a deduction within its schedule
+        label = label[len("Less: "):]
     li = LineItem(
         statement=statement,
         line_item=label,
@@ -325,10 +337,51 @@ def _is_digital(group):
     return bool(rows) and not any("ocr" in r.flags for r in rows)
 
 
+def _map_owners_capital(g, fy_columns, multiplier, result, note_scale=1):
+    """
+    A partners' / proprietor's capital note: for each partner, 'As per last Balance Sheet', 'Add: remuneration,
+    interest, credits', 'Share of profit', 'Less: drawings, TDS'. Openings -> Opening Reserves, movements ->
+    Reserves Adjustments, the profit share is left to the template (it adds the P&L profit). Balances printed
+    before the first opening line (the fixed capital accounts) and the per-partner closing balances are skipped.
+    True if the note had a roll-forward.
+    """
+    g = _rescaled(g, note_scale)
+    start = next((i for i, r in enumerate(g.items) if _OPENING.search(r.label)), None)
+    if start is None:
+        return False
+    sign = 1
+    for r in g.items[start:]:
+        low = r.label.lower().strip()
+        if _OPENING.search(low):
+            tag, sign = "Opening Reserves", 1
+        elif re.match(r"^\W*less\b", low):
+            tag, sign = "Reserves Adjustments", -1
+        elif re.match(r"^\W*add\b", low):
+            tag, sign = "Reserves Adjustments", 1
+        elif _PROFIT_LINE.search(low) or re.search(r"share\s*of\s*(?:net\s*)?(?:profit|loss)", low):
+            continue
+        elif r.is_total or not _has_values(r):
+            continue
+        else:
+            tag = "Reserves Adjustments"          # a continuation line under 'Add:' / 'Less:'
+        values = {fy: (sign * abs(v) if (tag == "Reserves Adjustments" and v is not None) else v)
+                  for fy, v in r.values.items()}
+        if _all_zero(values):
+            continue
+        li = _make_item(r.label, values, "BS", g.title, "pdf-note", r.page, r.flags, fy_columns, multiplier)
+        li.statement_tag, li.category, li.is_new, li.confidence = tag, "", False, "Matched"
+        li.flags = [f for f in li.flags if f not in ("unplaced", "sum_mismatch")]
+        result.items.append(li)
+    return True
+
+
 def _map_reserves(groups, fy_columns, multiplier, result, face_reserves=None, note_scale=1):
     found = False
     for options in groups.values():
         for g in options:
+            if not _RESERVES.search(g.title) and _OWNERS_NOTE.search(g.title):
+                found = _map_owners_capital(g, fy_columns, multiplier, result, note_scale) or found
+                continue
             if not _RESERVES.search(g.title):
                 continue
             found = True
@@ -392,7 +445,8 @@ def map_extraction(extraction, unit_multiplier=None):
                 found.append(s)
     note_scale = max(set(found), key=found.count) if found else 1
 
-    face_reserves = next((r for r in face if r.statement == "BS" and _RESERVES.search(r.label) and _has_values(r)), None)
+    face_reserves = next((r for r in face if r.statement == "BS" and (_RESERVES.search(r.label) or _OWNERS_CAPITAL.search(r.label))
+                          and _has_values(r)), None)
     _map_reserves(groups, fy, mult, result, face_reserves, note_scale)
 
     assets_side, seen_total = None, False   # where on the balance sheet the line sits
@@ -439,7 +493,7 @@ def map_extraction(extraction, unit_multiplier=None):
                 assets_side = True        # Schedule III order: equity & liabilities, their Total, then assets
             if F.is_total and re.fullmatch(r"total\W*", label.strip(), re.I):
                 seen_total = True
-        if F.is_total or _RESERVES.search(label):
+        if F.is_total or _RESERVES.search(label) or (F.statement == "BS" and _OWNERS_CAPITAL.search(label)):
             continue
         if _SUMMARY_LINE.search(label) and not re.search(r"other\s*income", label, re.I):
             result.skipped.append((label, "summary / per-share line"))

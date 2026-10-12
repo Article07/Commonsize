@@ -64,7 +64,7 @@ _CANONICAL_LINES = [
     "long term loans and advances", "short term loans and advances", "inventories", "trade receivables",
     "cash and cash equivalents", "other current assets", "other non current assets",
 ]
-_SCALES = (1, 1 / 1000, 1 / 100000, 1 / 10000000, 1000)
+_SCALES = (1, 1 / 1000, 1 / 100000, 1 / 10000000, 1000, 1 / 100)
 _RESERVES = re.compile(r"reserves?\s*(?:and|&)\s*surplus", re.I)
 # a partnership's / proprietor's capital account that takes the year's profit (not a fixed capital account): it
 # rolls forward like Reserves & Surplus -- opening balance, partners' remuneration / interest / drawings, profit
@@ -398,6 +398,64 @@ def _map_owners_capital(g, fy_columns, multiplier, result, note_scale=1):
     return True
 
 
+_RES_OPENING = re.compile(r"opening|beginning|as\s*per\s*(?:last|previous)\s*balance\s*sheet|brought\s*forward|balance\s*b\W*f",
+                          re.I)
+_RES_CLOSING = re.compile(r"closing|balance\s*at\s*the\s*end|end\s*of\s*the\s*year|carried\s*forward|balance\s*c\W*f", re.I)
+
+
+def _res_sum(g, pattern, fy):
+    vals = [r.values.get(fy) for r in g.items if pattern.search(r.label) and r.values.get(fy) is not None]
+    return sum(vals) if vals else None
+
+
+def _sign_unlabelled_movements(g, rows, fy_columns):
+    """
+    A movement printed without 'Add' / 'Less' ("Transfer to General Reserve 13,469" under a 'Less: Appropriation'
+    heading the reader cannot see): the note's own roll-forward decides its sign, per year.
+    """
+    for fy in fy_columns:
+        opening, closing = _res_sum(g, _RES_OPENING, fy), _res_sum(g, _RES_CLOSING, fy)
+        if closing is None and g.total is not None:
+            closing = g.total.values.get(fy)
+        if opening is None or closing is None:
+            continue
+        profit = sum(r.values.get(fy) or 0.0 for r in g.items if _PROFIT_LINE.search(r.label)
+                     and not _RES_CLOSING.search(r.label) and not r.is_total)
+        signed = sum(v.get(fy) or 0.0 for _, t, v, u in rows if t == "Reserves Adjustments" and not u)
+        unsigned = sum(v.get(fy) or 0.0 for _, t, v, u in rows if u)
+        if not unsigned:
+            continue
+        base = opening + profit + signed
+        if abs(base + unsigned - closing) > TOL and abs(base - unsigned - closing) <= TOL:
+            for _, _, values, u in rows:
+                if u and values.get(fy):
+                    values[fy] = -values[fy]
+
+
+def _opening_differences(g, fy_columns, multiplier, result):
+    """
+    The template carries each year's closing reserves forward as the next year's opening. When the note's
+    printed opening balance for a year differs from its printed closing balance of the year before, that
+    difference is a movement of the year as the financials state it, and is kept as one.
+    """
+    years = sorted(fy_columns, key=lambda f: int(f[2:]) if f[2:].isdigit() else 0)
+    diffs = {}
+    for prev, cur in zip(years, years[1:]):
+        opening, closing = _res_sum(g, _RES_OPENING, cur), _res_sum(g, _RES_CLOSING, prev)
+        if closing is None and g.total is not None:
+            closing = g.total.values.get(prev)
+        if opening is not None and closing is not None and abs(opening - closing) > 0.005:
+            diffs[cur] = opening - closing
+    if diffs:
+        li = _make_item("Opening balance as printed less last year's closing balance", diffs, "BS", g.title, "pdf-note",
+                        g.items[0].page if g.items else None, ["opening_differs_from_last_closing"], fy_columns, multiplier)
+        li.statement_tag, li.category, li.is_new, li.confidence = "Reserves Adjustments", "", False, "Matched"
+        li.flags = [f for f in li.flags if f != "unplaced"]
+        result.items.append(li)
+        result.log.append(f"{g.title}: the opening balance printed for {', '.join(diffs)} differs from the previous "
+                          f"year's closing balance; the difference is shown as a separate reserves movement")
+
+
 def _map_reserves(groups, fy_columns, multiplier, result, face_reserves=None, note_scale=1):
     found = False
     for options in groups.values():
@@ -416,19 +474,24 @@ def _map_reserves(groups, fy_columns, multiplier, result, face_reserves=None, no
                 scale = _scale_between(basis, face_reserves.values, fy_columns)
             g = _rescaled(g, scale if scale is not None else note_scale)
             less_sign = _less_sign(g, fy_columns)
+            rows = []                                   # (row, tag, values, unsigned)
             for r in g.items:
                 low = r.label.lower()
-                if re.search(r"opening", low):
+                if _RES_OPENING.search(low):
                     tag = "Opening Reserves"
                 elif re.search(r"securities\s*premium", low):
                     tag = "Securities Premium"
-                elif _PROFIT_LINE.search(low):
+                elif _PROFIT_LINE.search(low) or _RES_CLOSING.search(low) or r.is_total:
                     continue  # derived by the template from the P&L / roll-forward
                 else:
                     tag = "Reserves Adjustments"
                 values = dict(r.values)
+                signed = bool(re.match(r"^\W*(?:less|add)\b", low))
                 if tag == "Reserves Adjustments" and low.startswith("less"):
                     values = {fy: (less_sign(fy) * abs(v) if v is not None else None) for fy, v in values.items()}
+                rows.append((r, tag, values, tag == "Reserves Adjustments" and not signed))
+            _sign_unlabelled_movements(g, rows, fy_columns)
+            for r, tag, values, _ in rows:
                 if _all_zero(values):
                     continue
                 li = _make_item(r.label, values, "BS", g.title, "pdf-note", r.page, r.flags, fy_columns, multiplier)
@@ -436,6 +499,7 @@ def _map_reserves(groups, fy_columns, multiplier, result, face_reserves=None, no
                 li.confidence = "Matched"
                 li.flags = [f for f in li.flags if f not in ("unplaced", "sum_mismatch")]
                 result.items.append(li)
+            _opening_differences(g, fy_columns, multiplier, result)
     if not found:
         result.log.append("WARNING: no 'Reserves and Surplus' note found, so opening reserves were not captured; "
                           "the Balance Sheet will not tally until they are entered.")
@@ -512,6 +576,7 @@ def map_extraction(extraction, unit_multiplier=None):
     below_total = {id(r) for r in pnl[start + 1:end]} if start is not None and end is not None and end > start else set()
     for F in face:
         label = F.label
+        F_original = F
         below_line = id(F) in below_total
         if F.statement == "BS":
             section = F.heading or ""
@@ -650,6 +715,19 @@ def map_extraction(extraction, unit_multiplier=None):
             result.items.append(item)
         elif group is not None and group.total is not None and _has_values(group.total):
             vals = {fy_: group.total.values.get(fy_) for fy_ in fy}
+            # "(b) Trade Payables 6" printed without figures, its sub-lines below carrying them ("- Other than
+            # MSME 931.93"): the sub-lines are the line, the note's total is not added again
+            pos = next((k for k, r in enumerate(face) if r is F_original), None)
+            below = []
+            for r in (face[pos + 1:] if pos is not None else []):
+                if r.note_ref or r.is_total or r.statement != F.statement:
+                    break
+                if _has_values(r):
+                    below.append(r)
+            if below and all(abs(_sum_for(below, y) - (vals.get(y) or 0.0)) <= max(TOL, 0.5 * len(below))
+                             for y in fy if vals.get(y) is not None):
+                result.skipped.append((label, "parent line; its sub-lines carry the figures"))
+                continue
             if not _all_zero(vals):
                 flags.append("value_from_note_total")
                 result.items.append(_make_item(label, vals, F.statement, heading, "pdf-note", group.total.page,

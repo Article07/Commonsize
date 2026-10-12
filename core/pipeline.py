@@ -12,18 +12,22 @@ from config.schedule_map import FY_COLUMN_MAP
 from core import classifier, io_loader
 from core.balance_check import balance_check
 from core.pdf_mapper import map_extraction
-from core.pdf_reader import extract_financials
+from core import xbrl_reader
+from core.pdf_reader import extract_from_pages, read_pages
 from core.render_writer import write_workbook
 from core.resolver import resolve
 from core.routing import schedule_for
 
 TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "template" / "commonsize_template.xlsx"
-_PAT_LABEL = re.compile(r"profit\s*(?:/\s*\(?loss\)?\s*)?(?:for\s+the\s+(?:year|period)|after\s+tax)", re.I)
+_PAT_LABEL = re.compile(r"profit\s*(?:/?\s*\(?\s*loss\s*\)?\s*)?(?:for\s+(?:the\s+)?(?:year|period)|after\s+tax)", re.I)
 
 
 def read_pdf(pdf_bytes, progress=None):
     """-> (ExtractionResult, MappingResult)"""
-    extraction = extract_financials(pdf_bytes, progress=progress)
+    pages = read_pages(pdf_bytes, progress=progress)
+    if xbrl_reader.is_xbrl(pages):        # the MCA AOC-4 XBRL rendering: read by its taxonomy sections
+        return xbrl_reader.read(pages)
+    extraction = extract_from_pages(pages)
     return extraction, map_extraction(extraction)
 
 
@@ -47,7 +51,7 @@ def read_structured(path):
 def reported_pat(extraction):
     """Profit after tax exactly as the financials print it, in rupees {fy: value}."""
     for row in extraction.rows:
-        if row.statement == "P&L" and _PAT_LABEL.search(row.label) and not re.search(r"before", row.label, re.I):
+        if row.statement == "P&L" and _PAT_LABEL.search(row.label) and not re.search(r"before|continuing", row.label, re.I):
             if all(row.values.get(fy) is not None for fy in extraction.fy_columns):
                 return {fy: row.values[fy] * extraction.unit_multiplier for fy in extraction.fy_columns}
     # the face line is sometimes unreadable in a scan; the reserves note repeats the same profit. The note can
@@ -100,7 +104,7 @@ _FACE_LINES = [
     ("revenue", "Revenue from operations", "P&L", r"^revenue\s*from\s*operations"),
     ("total_income", "Total income", "P&L", r"^total\s*(income|revenue)"),
     ("total_expenses", "Total expenses", "P&L", r"^total\s*expenses"),
-    ("pbt", "Profit before tax", "P&L", r"^(?:net\s*)?profit\s*before\s*tax"),
+    ("pbt", "Profit before tax", "P&L", r"^(?:net\s*|total\s*)?profit\s*(?:\(loss\)\s*)?before\s*tax"),
     ("tax", "Tax expense", "P&L", r"^total\s*tax|^tax\s*expense(?!.*discontinu)"),
 ]
 
@@ -130,6 +134,20 @@ def _below_total(items, fy):
     return income, expenses, tax
 
 
+def _bs_totals(extraction, fy):
+    """
+    (Total equity and liabilities, Total assets) as the balance sheet prints them: the explicitly named totals
+    when present (section subtotals are also labelled "Total"), else its first two plain "Total" lines.
+    """
+    liab = _face_total(extraction, "BS", r"^total\s*equity\s*(?:and|&)\s*liabilities\W*$", fy)
+    if liab is None:
+        liab = _face_total(extraction, "BS", r"^total\s*liabilities\W*$", fy)
+    assets = _face_total(extraction, "BS", r"^total\s*assets\W*$", fy)
+    if liab is not None and assets is not None:
+        return liab, assets
+    return tuple(_face_total(extraction, "BS", r"^total\W*(?:rs\W*)?$", fy, skip=k) for k in (0, 1))
+
+
 def reconcile(extraction, items, fy_columns):
     """
     Compares what the app computed with the figures the input itself prints.
@@ -157,7 +175,7 @@ def reconcile(extraction, items, fy_columns):
                 out.append(dict(year=fy, line=label, computed=computed[key], reported=reported))
         if fy in pat:
             out.append(dict(year=fy, line="Profit for the year", computed=s["pat"], reported=pat[fy]))
-        liab, assets = (_face_total(extraction, "BS", r"^total\W*(?:rs\W*)?$", fy, skip=k) for k in (0, 1))
+        liab, assets = _bs_totals(extraction, fy)
         total_liab = s["liabilities_side"] + s["current_liabilities"] + max(-s["deferred_tax_net"], 0.0)
         if liab is not None:
             out.append(dict(year=fy, line="Total equity and liabilities", computed=total_liab, reported=liab))
@@ -173,8 +191,7 @@ def source_balance(extraction, fy_columns):
     """{fy: (reported liabilities total, reported assets total)} for years where the input prints both."""
     out = {}
     for fy in fy_columns:
-        liab = _face_total(extraction, "BS", r"^total\W*(?:rs\W*)?$", fy, skip=0)
-        assets = _face_total(extraction, "BS", r"^total\W*(?:rs\W*)?$", fy, skip=1)
+        liab, assets = _bs_totals(extraction, fy)
         if liab is not None and assets is not None:
             out[fy] = (liab, assets)
     return out
@@ -219,4 +236,6 @@ def read_excel(xlsx_bytes):
 
 def remap(extraction, unit_multiplier):
     """Re-run the mapping with a different unit (no re-reading of the file)."""
+    if getattr(extraction, "xbrl", None):
+        return xbrl_reader.map_xbrl(extraction, unit_multiplier)
     return map_extraction(extraction, unit_multiplier)

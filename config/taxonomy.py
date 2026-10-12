@@ -232,6 +232,17 @@ MATCHABLE_TAXONOMY = [e for e in TAXONOMY if e.target is not None]
 #   row_label = the template row to use when a total has to stand in for a breakup
 #   (e.g. a face-statement "Employee Benefit Expenses" total whose note could not be read).
 BS_ALIASES = [
+    # Ind AS / MCA XBRL names ("Borrowings, non-current", "Other current financial assets" ...)
+    (r"(?:borrowings?|lease\s*liabilit\w*),?\s*non.?current|non.?current\s*(?:borrowings?|lease\s*liabilit)", "tag", "Borrowings - Long Term", "Term loan"),
+    (r"(?:borrowings?|lease\s*liabilit\w*),?\s*current|^\W*current\s*(?:borrowings?|lease\s*liabilit)", "tag", "Borrowings - Short Term", "Secured loan from banks"),
+    (r"provisions?,?\s*non.?current", "tag", "Long-term Provisions", "Provision for gratuity"),
+    (r"provisions?,?\s*current|current\s*tax\s*liabilit", "tag", "Short-term Provisions", "Provision for expenses"),
+    (r"disposal\s*group|liabilit\w*.{0,40}held\s*for\s*sale", "tag", "Current Liability - Other", "Other payables"),
+    (r"other\s*(?:non.?current\s*)?financial\s*liabilit|other\s*non.?current\s*liabilit", "tag", "Current Liability - Other", "Other payables"),
+    (r"loans?,?\s*non.?current|other\s*non.?current\s*financial\s*assets?", "tag", "Long-term Loans & Advances", "Security deposits"),
+    (r"loans?,?\s*current", "tag", "Short-term Loans & Advances", "Advance to employees"),
+    (r"held\s*for\s*sale|other\s*current\s*financial\s*assets?|current\s*tax\s*assets?|income\s*tax\s*assets?", "tag", "Current Asset - Other", "Prepaid exp."),
+    (r"right.of.use|goodwill|investment\s*propert", "tag", "Fixed Assets", "Property, plant and equipments"),
     (r"securities\s*premium", "tag", "Securities Premium", ""),
     (r"share\s*capital|equity\s*shares?|paid.?up|fixed\s*capital", "tag", "Paid-up Share Capital", ""),
     (r"def+er+ed\s*tax\s*liabilit", "tag", "Deferred Tax Liabilities", ""),

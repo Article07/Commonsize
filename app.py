@@ -157,7 +157,7 @@ def _generate(items, fy_cols, company, equity, reported, file_name):
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
 
-UNIT_CHOICES = {"Rs. (whole rupees)": 1, "Rs. in '000": 1_000, "Rs. in lakhs": 100_000,
+UNIT_CHOICES = {"Rs. (whole rupees)": 1, "Rs. in hundreds": 100, "Rs. in '000": 1_000, "Rs. in lakhs": 100_000,
                 "Rs. in millions": 1_000_000, "Rs. in crores": 10_000_000}
 
 

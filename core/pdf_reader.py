@@ -203,19 +203,141 @@ def _good(lines, conf):
     return conf >= 60 and len(lines) >= 4
 
 
+def _runs(mask, length):
+    """Pixels of `mask` covered by a horizontal run of at least `length` set pixels."""
+    import numpy as np
+    c = np.cumsum(np.pad(mask.astype(np.int32), ((0, 0), (1, 0))), axis=1)
+    full = (c[:, length:] - c[:, :-length]) == length
+    mark = np.zeros((mask.shape[0], mask.shape[1] + 1), np.int32)
+    mark[:, :full.shape[1]] += full
+    mark[:, length:length + full.shape[1]] -= full
+    return np.cumsum(mark, axis=1)[:, :mask.shape[1]] > 0
+
+
+def _without_rules(image):
+    """
+    The page with its table rules erased. Tesseract drops figures printed in ruled boxes (a statement's totals,
+    a boxed 'Revenue from operations'), so the long horizontal / vertical strokes are whitened first. A rule on
+    a slightly skewed scan drifts by a pixel, so runs are looked for in a three-pixel band.
+    """
+    import numpy as np
+    from PIL import Image
+    a = np.asarray(image).copy()
+    dark = a < 200
+    h, w = dark.shape
+    found = np.zeros_like(dark)
+    for grid, length, flip in ((dark, max(60, w // 30), False), (dark.T, max(60, h // 50), True)):
+        band = grid.copy()
+        band[1:] |= grid[:-1]
+        band[:-1] |= grid[1:]
+        rule = _runs(band, length)
+        rule[1:] |= rule[:-1]
+        rule[:-1] |= rule[1:]
+        # only pixels on a long stroke of their own row: a letter touching an underline ("BALANCE SHEET")
+        # keeps its shape
+        rule &= _runs(grid, 45)
+        found |= rule.T if flip else rule
+    a[found & dark] = 255
+    return Image.fromarray(a)
+
+
+def _figures_of(line):
+    """-> (label key, clean figures, garbled figures, the clean figures' digits) of an OCR line, read from its right end."""
+    tokens = _clean(line).split()
+    while tokens and re.fullmatch(r"[A-Za-z]{1,3}|\W+", tokens[-1]) and len(tokens) > 2:
+        tokens.pop()               # OCR debris after the figures ("Finance Cost 19 Pao fe i")
+    good = bad = 0
+    figures = []
+    while tokens and good + bad < 4:
+        t = tokens[-1]
+        if re.fullmatch(r"\(?-?\d{6,}\)?", t):
+            bad += 1        # "4380112": a long figure that lost its grouping commas is usually a misread
+        elif re.fullmatch(r"\(?-?[\d,]*\d(?:\.\d+)?\)?", t) or _is_dash(t):
+            good += 1
+            figures.append(re.sub(r"[^\d.]", "", t))
+        elif _garbled_figure(t) or (re.search(r"\d", t) and re.search(r"[A-Za-z]", t) and len(t) >= 3):
+            bad += 1
+        else:
+            break
+        tokens.pop()
+    key = re.sub(r"[^a-z]", "", " ".join(tokens).lower())
+    return key, good, bad, [f for f in figures if f]
+
+
+def _merge_reads(primary, other):
+    """
+    Line by line, the primary read unless the other read has the same line with clean figures where the
+    primary's are garbled or fewer.
+    """
+    from rapidfuzz import fuzz
+
+    def same(a, b):
+        return a == b or (min(len(a), len(b)) >= 6 and fuzz.ratio(a, b) >= 85)   # "revemue..." ~ "revenue..."
+
+    prim = [_figures_of(line) for line in primary]
+    oth = [_figures_of(line) for line in other]
+    out = list(primary)
+    match = {}                                       # other index -> primary index
+    for i, (key, good, bad, figs) in enumerate(prim):
+        if len(key) < 4:
+            continue
+        j = next((j for j, o in enumerate(oth) if j not in match and len(o[0]) >= 4 and same(key, o[0])), None)
+        if j is None:
+            continue
+        match[j] = i
+        _, g, b, alt_figs = oth[j]
+        # never trade a figure the primary read cleanly for a different one
+        if b == 0 and g and (bad or g > good) and all(f in alt_figs for f in figs if f not in ("", "0")):
+            out[i] = other[j]
+    # lines the primary read dropped altogether ("Total Assets 13,80,112 4,36,478"), placed after the line
+    # that precedes them in the other read
+    inserts = {}
+    after = -1
+    for j, (k, g, b, _) in enumerate(oth):
+        if j in match:
+            after = match[j]
+        elif len(k) >= 4 and g and not b and not any(same(k, p[0]) for p in prim if len(p[0]) >= 4):
+            inserts.setdefault(after, []).append(other[j])
+    merged = inserts.get(-1, [])
+    for i, line in enumerate(out):
+        merged.append(line)
+        merged += inserts.get(i, [])
+    return merged
+
+
+def _upright_read(pytesseract, image):
+    """-> (lines, confidence) of an upright page; a poor, speckled scan is retried through a light median
+    filter, kept only if it reads clearly better."""
+    lines, conf = _ocr_image_lines(pytesseract, image)
+    if len(lines) >= 4 and conf < 70:
+        from PIL import ImageFilter
+        d_lines, d_conf = _ocr_image_lines(pytesseract, image.filter(ImageFilter.MedianFilter(3)))
+        if d_conf >= conf + 5:
+            return d_lines, d_conf
+    return lines, conf
+
+
 def _ocr_page(pytesseract, base, small):
     """
-    OCR a page: upright first (most pages). Only if that reads poorly, ask Tesseract which way the page is
-    turned and read it once that way; if it cannot tell, try the other rotations, stopping at a good read.
+    OCR a page: upright first (most pages), with its table rules erased (figures in ruled boxes otherwise go
+    missing); a poor read is retried on the page as scanned. Only if that reads poorly, ask Tesseract which way
+    the page is turned and read it once that way; if it cannot tell, try the other rotations, stopping at a good read.
     """
-    lines, conf = _ocr_image_lines(pytesseract, base)
+    scanned, base = base, _without_rules(base)
+    lines, conf = _upright_read(pytesseract, base)
+    other = None
+    if conf < 75:
+        other = _upright_read(pytesseract, scanned)
+        if other[1] > conf + 2:
+            (lines, conf), other, base = other, (lines, conf), scanned
+    if classify_page(lines) in ("BS", "P&L"):
+        # a statement page is read both ways. The scan as it is stays the reading of record; the cleaned
+        # image only supplies the lines the scan garbles or misses (figures in ruled boxes, totals)
+        if other is None:
+            other = _upright_read(pytesseract, scanned)
+        clean_read, scan_read = (other[0], lines) if base is scanned else (lines, other[0])
+        lines = _merge_reads(scan_read, clean_read)
     best = (lines, conf, 0)
-    if len(lines) >= 4 and conf < 70:
-        # a poor, speckled scan: a light median filter often reads it much better; keep it only if clearly so
-        from PIL import ImageFilter
-        d_lines, d_conf = _ocr_image_lines(pytesseract, base.filter(ImageFilter.MedianFilter(3)))
-        if d_conf >= conf + 5:
-            best = (d_lines, d_conf, 0)
     if _good(*best[:2]):
         return best
     angle = _orientation(pytesseract, small)
@@ -337,6 +459,8 @@ def classify_page(lines):
 
 
 _UNIT_PATTERNS = [
+    # "(Rs in '00)" -- hundreds (checked before thousands: "'000" also starts with "'00")
+    (re.compile(r"in\s+(?:rs\.?|inr|₹)?\s*in\s*['’`]\s*00(?!0)|['’`]00\s*\)|\bin\s+hundreds?\b", re.I), 100, "Rs. in hundreds"),
     # "Figures in ₹ Thousands" -- OCR often turns the rupee sign into %, ®, €, 3 ...
     (re.compile(r"in\s+(?:rs\.?|inr|₹)?\s*in\s*['’`]?\s*000|\bi[na]\s+\S{0,3}\s*thousands?|'000|figures\s+in\s+.{0,4}thousand",
                 re.I), 1_000, "Rs. in '000"),
@@ -403,6 +527,7 @@ def _garbled_figure(tok):
 
 def _clean(text):
     text = _NOISE.sub(" ", text)
+    text = re.sub(r"\b([Tt])ota[!1]", r"\1otal", text)          # OCR's "Tota! Income"
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -479,6 +604,8 @@ def _document_uses_2_decimals(all_lines):
 
 _ENUMERATOR = re.compile(r"^(?:\(?[a-zA-Z]{1,4}[\)\}]|\(?[ivxlIVXL]{1,4}\)|[ivxlIVXL]{1,4}\s|[a-gA-G]\s(?=[A-Z]))\s*")
 _TOTAL = re.compile(r"^(?:grand\s+)?total\b(?!\s*outstanding)", re.I)   # not "total outstanding dues of ..."
+# "3 Share Capital (Rs in '00)": a note heading that also names its unit
+_UNIT_SUFFIX = re.compile(r"\s*\(\s*(?:rs\.?|₹|inr|amount|amt\.?|figures)\b[^)]{0,25}\)\s*$", re.I)
 _NOTE_HEADER = re.compile(
     r"^(?:(?i:note)\s*(?:(?i:no)\.?)?\s*)?((?=[0-9ilIoO]*\d)[0-9ilIoO]{1,2})(?:[.:\-]|\s)+(?:[0-9]{1,2}(?:[.:\-]|\s)+)?[\(\[\{]?\s*"
     r"([A-Za-z][A-Za-z &,/'()\.\-]{2,80}?)\s*:?\s*$"
@@ -511,6 +638,9 @@ def parse_line(line, ncols, decimals2, fy_columns):
         if not decimals2 and re.fullmatch(r"\(?-?\d{1,3}(?:[.,]\d{3})+\)?", tok) and "." in tok:
             tok, _ = tok.replace(".", ","), flags.append("decimal_repaired")
         tokens.append(tok)
+    if (len(tokens) >= 2 and tokens[-1] in {".", ":", "·", "'", ","}
+            and _is_valuelike(tokens[-2], decimals2) in ("value", "int", "suspect")):
+        tokens[-1] = "-"     # a Nil dash OCR read as a dot: "Cash and cash equivalents 43,226 ."
     peeled = []
     i = len(tokens)
     while i > 0 and len(peeled) < max(ncols, 1):
@@ -668,7 +798,7 @@ def extract_rows(pages, fy_columns, decimals2):
                 continue
             if statement == "NOTE" and (pg.page, raw) not in boilerplate:
                 # checked before the skip list, which would otherwise drop "NOTE 2 : RESERVES & SURPLUS"
-                m = _NOTE_HEADER.match(text)
+                m = _NOTE_HEADER.match(_UNIT_SUFFIX.sub("", text))
                 if m and not re.search(r"\d[\d,]*\.\d", text):
                     worded = bool(re.match(r"^\W*note\b", text, re.I))
                     if worded:

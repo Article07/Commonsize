@@ -29,7 +29,7 @@ from openpyxl.styles import PatternFill
 from openpyxl.utils import column_index_from_string, get_column_letter
 from rapidfuzz import fuzz
 
-from config.schedule_map import ALL_SCHEDULES, FY_COLUMN_MAP, SHEET_NAME, spare_row_numbers
+from config.schedule_map import ALL_SCHEDULES, FY_COLUMN_MAP, SHEET_NAME, column_map, spare_row_numbers
 from config.taxonomy import GENERIC_FILLERS
 from core.routing import CHANGE_IN_INVENTORIES, schedule_for
 
@@ -56,6 +56,7 @@ class WriteReport:
     log: list = field(default_factory=list)
     placements: list = field(default_factory=list)
     unplaced: list = field(default_factory=list)      # items written to the bottom block (not in totals)
+    columns: dict = field(default_factory=lambda: dict(FY_COLUMN_MAP))   # FY -> template column for this workbook
 
     @property
     def new_rows(self):
@@ -99,7 +100,7 @@ def _match_row(ws, sched, wanted, used):
 
 def _add_values(ws, row, item, fy_columns, report):
     for fy in fy_columns:
-        col = FY_COLUMN_MAP.get(fy)
+        col = report.columns.get(fy)
         value = item.fy_values.get(fy)
         if not col or value is None:
             continue
@@ -219,13 +220,13 @@ def _write_overflow_block(ws, items, fy_columns, report):
 def _write_opening_reserves(ws, item, fy_columns, report):
     sched = ALL_SCHEDULES["Reserves and Surplus"]
     row = sched["first_item_row"]
-    present = [fy for fy in fy_columns if fy in FY_COLUMN_MAP]
+    present = [fy for fy in fy_columns if fy in report.columns]
     if not present:
         return
     earliest = present[0]
     value = item.fy_values.get(earliest)
     if value is not None:
-        cell = ws[f"{FY_COLUMN_MAP[earliest]}{row}"]
+        cell = ws[f"{report.columns[earliest]}{row}"]
         cell.value = (cell.value if isinstance(cell.value, (int, float)) else 0.0) + value
     ignored = [fy for fy in present[1:] if item.fy_values.get(fy) is not None]
     if ignored:
@@ -233,11 +234,11 @@ def _write_opening_reserves(ws, item, fy_columns, report):
                           "each year's closing reserves forward, only the earliest year's opening balance is an input.")
 
 
-def _write_change_in_inventories(ws, items, fy_columns):
+def _write_change_in_inventories(ws, items, fy_columns, columns):
     opening = ALL_SCHEDULES["Opening Stock (Change in Inventories)"]["first_item_row"]
     closing = ALL_SCHEDULES["Closing Stock (Change in Inventories)"]["first_item_row"]
     for fy in fy_columns:
-        col = FY_COLUMN_MAP.get(fy)
+        col = columns.get(fy)
         values = [i.fy_values.get(fy) for i in items if i.fy_values.get(fy) is not None]
         if not col or not values:
             continue
@@ -268,7 +269,7 @@ def _split_column_groups(ws, upto=40):
             ws.column_dimensions[get_column_letter(upto + 1)] = rest
 
 
-def _hide_unused_years(wb, fy_columns):
+def _hide_unused_years(wb, fy_columns, columns):
     """
     The template carries reserves forward into every year column, so years with no data would show a spurious
     non-zero balance-sheet check. Years without data are hidden (unhide them, or add the year with the
@@ -278,7 +279,7 @@ def _hide_unused_years(wb, fy_columns):
     for name in ("IS", "BS", "CF", "Ratios"):
         _split_column_groups(wb[name])
     letters = "CDEFG"
-    years = list(FY_COLUMN_MAP)                      # FY22..FY26, aligned with C..G
+    years = list(columns)                            # the five years of columns C..G
     data = [fy for fy in years if fy in fy_columns]
     for i, fy in enumerate(years):
         has_data = fy in data
@@ -291,6 +292,16 @@ def _hide_unused_years(wb, fy_columns):
             wb["CF"].column_dimensions[letters[i - 1]].hidden = not has_prior
 
 
+def _relabel_years(wb, columns):
+    """Year headings for a moved window: IS / Sch. 'FY22' -> 'FY19', BS '31 Mar 22' -> '31 Mar 19' (CF and Ratios
+    take theirs from these)."""
+    for fy, col in columns.items():
+        yy = fy[2:]
+        wb["IS"][f"{col}5"].value = fy
+        wb[SHEET_NAME][f"{col}6"].value = fy
+        wb["BS"][f"{col}5"].value = f"31 Mar {yy}"
+
+
 def _cash_flow_share_capital(wb, ws, fy_columns, report):
     """
     The template's cash flow finances only 'Changes in reserves' (reserves less profit); when share capital
@@ -298,8 +309,8 @@ def _cash_flow_share_capital(wb, ws, fy_columns, report):
     in net worth instead, so the cash-flow check still closes.
     """
     row = ALL_SCHEDULES["Share Capital"]["first_item_row"]
-    capital = {fy: ws[f"{FY_COLUMN_MAP[fy]}{row}"].value or 0.0 for fy in fy_columns if fy in FY_COLUMN_MAP}
-    years = [fy for fy in FY_COLUMN_MAP if fy in capital]
+    capital = {fy: ws[f"{report.columns[fy]}{row}"].value or 0.0 for fy in fy_columns if fy in report.columns}
+    years = [fy for fy in report.columns if fy in capital]
     if all(abs(capital[a] - capital[b]) < 0.5 for a, b in zip(years, years[1:])):
         return
     cf, bs = wb["CF"], wb["BS"]
@@ -325,10 +336,11 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
     so the template's own 'Difference' row reconciles the computed PAT with it.
     """
     report = WriteReport()
-    fy_columns = sorted(fy_columns)
+    fy_columns = sorted(fy_columns, key=lambda f: int(f[2:]))
+    report.columns = column_map(fy_columns)
     for fy in fy_columns:
-        if fy not in FY_COLUMN_MAP:
-            report.log.append(f"WARNING: {fy} is outside the template's columns ({', '.join(FY_COLUMN_MAP)}); not written.")
+        if fy not in report.columns:
+            report.log.append(f"WARNING: {fy} is outside the workbook's five year columns ({', '.join(report.columns)}); not written.")
 
     wb = openpyxl.load_workbook(template_path)
     ws = wb[SHEET_NAME]
@@ -384,7 +396,7 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
             report.placements.append(Placement(item.line_item, key, 0, "unplaced", True))
 
     if inventory_items:
-        _write_change_in_inventories(ws, inventory_items, fy_columns)
+        _write_change_in_inventories(ws, inventory_items, fy_columns, report.columns)
     if extras:
         _write_schedule_extras(ws, extras, fy_columns, report)
         report.log.append(f"NOTE: {sum(len(v) for v in extras.values())} new item(s) did not fit in the template's spare rows; "
@@ -396,15 +408,17 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
                           "total; the balance check will show their effect.")
 
     for fy, value in (reported_pat or {}).items():
-        col = FY_COLUMN_MAP.get(fy)
+        col = report.columns.get(fy)
         if col and value is not None and fy in fy_columns:
             wb["IS"][f"{col}24"].value = value / 1_000_000   # IS is in INR million
 
     if equity_shares:
         ws[f"B{ALL_SCHEDULES['Share Capital']['first_item_row']}"].value = f"{equity_shares} equity shares of Rs. 10 each"
 
+    if report.columns != FY_COLUMN_MAP:
+        _relabel_years(wb, report.columns)
     _cash_flow_share_capital(wb, ws, fy_columns, report)
-    _hide_unused_years(wb, fy_columns)
+    _hide_unused_years(wb, fy_columns, report.columns)
     wb.calculation.fullCalcOnLoad = True   # openpyxl drops cached results; Excel recomputes on open
     wb.save(output_path)
     return report

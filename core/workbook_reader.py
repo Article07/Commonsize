@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import openpyxl
 
-from config.schedule_map import ALL_SCHEDULES, FY_COLUMN_MAP, SHEET_NAME
+from config.schedule_map import ALL_SCHEDULES, FY_COLUMN_MAP, SHEET_NAME, column_map
 from core.models import LineItem
 from core.routing import CHANGE_IN_INVENTORIES
 
@@ -39,9 +39,19 @@ class WorkbookData:
     warnings: list = field(default_factory=list)
 
 
-def _values(ws, row):
+def _columns(ws):
+    """FY -> column as this workbook's own Sch. headings say ('FY19' ... when written for earlier years)."""
+    found = {}
+    for col in FY_COLUMN_MAP.values():
+        label = str(ws[f"{col}6"].value or "").strip()
+        if re.fullmatch(r"FY\d\d", label):
+            found[label] = col
+    return found if len(found) == len(FY_COLUMN_MAP) else dict(FY_COLUMN_MAP)
+
+
+def _values(ws, row, columns):
     out = {}
-    for fy, col in FY_COLUMN_MAP.items():
+    for fy, col in columns.items():
         v = ws[f"{col}{row}"].value
         out[fy] = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
     return out
@@ -64,6 +74,7 @@ def read_workbook(path):
         raise ValueError("This workbook was made with an older version of the template, so its rows are in different "
                          "places. Please generate it again from the original financials, then add the new year.")
     data = WorkbookData(company=str(wb["IS"]["B2"].value or ""))
+    columns = _columns(ws)
 
     share_label = str(ws[f"B{ALL_SCHEDULES['Share Capital']['first_item_row']}"].value or "")
     m = re.match(r"\s*([\d,\.]+)\s+equity shares", share_label)
@@ -75,10 +86,10 @@ def read_workbook(path):
         statement = "P&L" if key in PNL_SCHEDULES else "BS"
         rows = [sched["first_item_row"]] if key in SINGLE_CELL_SCHEDULES else range(sched["first_item_row"], sched["last_item_row"] + 1)
         for r in rows:
-            values = _values(ws, r)
+            values = _values(ws, r, columns)
             if key == "Reserves and Surplus":
                 values = {fy: v for fy, v in values.items() if v is not None}   # only the earliest year is an input
-                values = {fy: values.get(fy) for fy in FY_COLUMN_MAP}
+                values = {fy: values.get(fy) for fy in columns}
             if not _has_value(values):
                 continue
             label = str(ws.cell(r, 2).value or key)
@@ -92,19 +103,19 @@ def read_workbook(path):
             ))
 
     opening, closing = (ALL_SCHEDULES[k]["first_item_row"] for k in _STOCK_ROWS)
-    op, cl = _values(ws, opening), _values(ws, closing)
+    op, cl = _values(ws, opening, columns), _values(ws, closing, columns)
     change = {fy: ((op[fy] or 0.0) - (cl[fy] or 0.0)) if (op[fy] is not None or cl[fy] is not None) else None
-              for fy in FY_COLUMN_MAP}
+              for fy in columns}
     if _has_value(change):
         data.items.append(LineItem(statement="P&L", line_item="Change in inventories", statement_tag="Change in Inventories",
                                    fy_values=change, source="workbook", schedule_override=CHANGE_IN_INVENTORIES))
 
-    for fy, col in FY_COLUMN_MAP.items():
+    for fy, col in columns.items():
         v = wb["IS"][f"{col}24"].value
         if isinstance(v, (int, float)):
             data.reported_pat[fy] = float(v) * 1_000_000
 
-    data.fy_columns = [fy for fy in FY_COLUMN_MAP
+    data.fy_columns = [fy for fy in columns
                        if any(i.fy_values.get(fy) for i in data.items if i.schedule_override != "Reserves and Surplus")]
     return data
 
@@ -118,11 +129,13 @@ def merge_new_year(existing, new_items, new_fy, new_reported_pat=None):
     Returns (items, fy_columns, reported_pat, warnings).
     """
     warnings = []
-    if new_fy not in FY_COLUMN_MAP:
-        raise ValueError(f"{new_fy} is outside the template's columns ({', '.join(FY_COLUMN_MAP)}).")
+    window = column_map(list(existing.fy_columns) + [new_fy])
+    if new_fy not in window or any(fy not in window for fy in existing.fy_columns):
+        raise ValueError(f"{new_fy} does not fit in the workbook's five year columns together with "
+                         f"{', '.join(existing.fy_columns)}.")
     if existing.fy_columns and new_fy in existing.fy_columns:
         raise ValueError(f"{new_fy} is already in the workbook; updating an existing year is not supported.")
-    order = list(FY_COLUMN_MAP)
+    order = list(window)
     if existing.fy_columns and order.index(new_fy) < order.index(existing.fy_columns[-1]):
         raise ValueError(f"{new_fy} is earlier than the latest year in the workbook ({existing.fy_columns[-1]}); "
                          "only a later year can be added.")
@@ -135,7 +148,7 @@ def merge_new_year(existing, new_items, new_fy, new_reported_pat=None):
         value = item.fy_values.get(new_fy)
         if value is None or item.schedule_override == "Reserves and Surplus":
             continue
-        clone = LineItem(**{**item.__dict__, "fy_values": {fy: (value if fy == new_fy else None) for fy in FY_COLUMN_MAP}})
+        clone = LineItem(**{**item.__dict__, "fy_values": {fy: (value if fy == new_fy else None) for fy in window}})
         if item.statement_tag == "Opening Reserves":
             continue   # the new year opens from the previous closing balance
         merged.append(clone)
@@ -148,7 +161,7 @@ def merge_new_year(existing, new_items, new_fy, new_reported_pat=None):
 def merge_new_years(existing, new_items, new_fys, new_reported_pat=None):
     """merge_new_year for several later years at once (oldest first). Returns (items, fy_columns, reported_pat, warnings)."""
     data, warnings = existing, []
-    for fy in sorted(new_fys):
+    for fy in sorted(new_fys, key=lambda f: int(f[2:])):
         items, fy_columns, reported, warns = merge_new_year(data, new_items, fy, new_reported_pat)
         warnings += warns
         data = WorkbookData(company=existing.company, equity_shares=existing.equity_shares, fy_columns=fy_columns,

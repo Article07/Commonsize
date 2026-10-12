@@ -19,7 +19,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-from config.schedule_map import FY_COLUMN_MAP
+from config.schedule_map import column_map
 import ui
 from core import pipeline
 from core.routing import all_placeable_schedules, schedule_for
@@ -435,14 +435,17 @@ with st.expander("What the reader found and checked"):
         for line in s.log + (s.extraction.checks if s.extraction is not None else []):
             st.write("- " + line)
 
-unsupported = [fy for fy in data["fy_cols"] if fy not in FY_COLUMN_MAP]
+# the workbook's five year columns: FY22-FY26, or five years from the earliest year read (an FY2019-20 filing)
+window = column_map((list(existing.fy_columns) if existing else []) + list(data["fy_cols"]))
+unsupported = [fy for fy in data["fy_cols"] if fy not in window]
 if unsupported:
-    st.warning(f"{', '.join(unsupported)} is outside the template's years ({', '.join(FY_COLUMN_MAP)}) and will not be written.")
+    st.warning(f"{', '.join(unsupported)} does not fit in the workbook's five year columns ({', '.join(window)}) "
+               "and will not be written.")
 
-available = [fy for fy in data["fy_cols"] if fy in FY_COLUMN_MAP]
+available = [fy for fy in data["fy_cols"] if fy in window]
 if existing:
     later = [fy for fy in available if not existing.fy_columns
-             or list(FY_COLUMN_MAP).index(fy) > list(FY_COLUMN_MAP).index(existing.fy_columns[-1])]
+             or (existing.fy_columns[-1] in window and list(window).index(fy) > list(window).index(existing.fy_columns[-1]))]
     if not later:
         st.error("The files have no year later than the latest year already in the workbook.")
         _stop()

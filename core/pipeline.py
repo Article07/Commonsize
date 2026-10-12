@@ -8,7 +8,7 @@ import re
 import tempfile
 from pathlib import Path
 
-from config.schedule_map import FY_COLUMN_MAP
+from config.schedule_map import column_map
 from core import classifier, io_loader
 from core.balance_check import balance_check
 from core.pdf_mapper import map_extraction
@@ -84,13 +84,13 @@ def tolerance(unit_multiplier, whole_units=False):
 
 
 def check(items, fy_columns, unit_multiplier, whole_units=False):
-    fys = [fy for fy in sorted(fy_columns) if fy in FY_COLUMN_MAP]
+    fys = [fy for fy in sorted(fy_columns, key=lambda f: int(f[2:])) if fy in column_map(fy_columns)]
     return balance_check(items, fys, tolerance(unit_multiplier, whole_units))
 
 
 def build_workbook(items, fy_columns, company, equity_shares=None, reported=None):
     """-> (xlsx bytes, WriteReport)"""
-    fys = [fy for fy in sorted(fy_columns) if fy in FY_COLUMN_MAP]
+    fys = [fy for fy in sorted(fy_columns, key=lambda f: int(f[2:])) if fy in column_map(fy_columns)]
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "commonsize.xlsx"
         report = write_workbook(TEMPLATE_PATH, out, company, items, fys, equity_shares=equity_shares,
@@ -102,7 +102,7 @@ def build_workbook(items, fy_columns, company, equity_shares=None, reported=None
 _FACE_LINES = [
     # (key, label shown, statement, regex on the printed label)
     ("revenue", "Revenue from operations", "P&L", r"^revenue\s*from\s*operations"),
-    ("total_income", "Total income", "P&L", r"^total\s*(income|revenue)"),
+    ("total_income", "Total income", "P&L", r"^total\s*(?:income|revenue)(?!\s*from)"),
     ("total_expenses", "Total expenses", "P&L", r"^total\s*expenses"),
     ("pbt", "Profit before tax", "P&L", r"^(?:net\s*|total\s*)?profit\s*(?:\(loss\)\s*)?before\s*tax"),
     ("tax", "Tax expense", "P&L", r"^total\s*tax|^tax\s*expense(?!.*discontinu)"),
@@ -120,18 +120,20 @@ def _below_total(items, fy):
     (other income, expenses, tax) of P&L items printed after 'Total expenses' and before profit before tax
     (exceptional items, partners' remuneration): the statement's own Total income / Total expenses leave them out.
     """
-    income = expenses = tax = 0.0
+    income = expenses = tax = after_tax = 0.0
     for item in items:
         if item.statement != "P&L" or "below_total_expenses" not in item.flags:
             continue
         key, value = schedule_for(item), item.fy_values.get(fy) or 0.0
+        if "minority_interest" in item.flags:
+            after_tax += value        # the minority's share comes after tax
         if key == "Other Income":
             income += value
         elif key == "Tax Expense":
             tax += value
         else:
             expenses += value
-    return income, expenses, tax
+    return income, expenses, tax, after_tax
 
 
 def _bs_totals(extraction, fy):
@@ -153,20 +155,20 @@ def reconcile(extraction, items, fy_columns):
     Compares what the app computed with the figures the input itself prints.
     -> list of dict(year, line, computed, reported, diff, ok). Lines the input does not show are left out.
     """
-    fys = [fy for fy in sorted(fy_columns) if fy in FY_COLUMN_MAP]
+    fys = [fy for fy in sorted(fy_columns, key=lambda f: int(f[2:])) if fy in column_map(fy_columns)]
     result = check(items, fys, extraction.unit_multiplier, extraction.whole_units)
     tol = tolerance(extraction.unit_multiplier, extraction.whole_units)
     pat = reported_pat(extraction)
     out = []
     for fy in fys:
         s = result.statements[fy]
-        income_below, expenses_below, tax_below = _below_total(items, fy)
+        income_below, expenses_below, tax_below, after_tax = _below_total(items, fy)
         computed = {
             "revenue": s["revenue"],
             "total_income": s["revenue"] + s["other_income"] - income_below,
             "total_expenses": s["revenue"] - s["operating_pbt"] - expenses_below,
             # tax of earlier years printed above profit before tax is part of the app's tax expense
-            "pbt": s["operating_pbt"] + s["other_income"] - tax_below,
+            "pbt": s["operating_pbt"] + s["other_income"] - tax_below - after_tax,
             "tax": s["tax"] - tax_below,
         }
         for key, label, statement, pattern in _FACE_LINES:

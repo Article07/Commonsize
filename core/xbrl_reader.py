@@ -16,7 +16,7 @@ Line names go through the same taxonomy / resolver as every other input.
 import re
 from dataclasses import dataclass, field
 
-from core.pdf_mapper import MappingResult, _SAME_IS_LINE, _SUMMARY_LINE, _make_item, _side_rules
+from core.pdf_mapper import MappingResult, _PNL_ITEM_BELOW, _SAME_IS_LINE, _SUMMARY_LINE, _make_item, _side_rules
 from core.pdf_reader import ExtractedRow, ExtractionResult
 from core.routing import schedule_for
 
@@ -30,14 +30,18 @@ _NOT_A_ROW = re.compile(r"\[(?:abstract|table|axis|member|line items|text\s*bloc
                         r"|^description\b|^\[inr/shares\]|\[(?:inr/shares|pure)\]", re.I)
 _PAGE_HEADER = re.compile(r"standalone financial statements for period|consolidated financial statements for period", re.I)
 TOL = 0.011
+# section codes: Ind AS taxonomy, then the older Indian GAAP (Schedule III) taxonomy
+_BS_CODES, _PNL_CODES = ("110000", "100100"), ("210000", "100200")
+_NOTE_CODES, _EQUITY_CODES = ("500100", "300500"), ("400200", "200200")
+_PNL_MUST = r"^revenue from|^total income|^total revenue"
 
 
 def is_xbrl(pages):
     """True for the MCA XBRL rendering: a '[110000] Balance sheet' section and the 'for period' page header."""
     text = [l for p in pages for l in p.lines[:4]]
+    codes = {m.group(1) for p in pages for l in p.lines if (m := re.match(r"^\[(\d{6})\]", l))}
     return (any(_PAGE_HEADER.search(l) for l in text)
-            and any(re.match(r"^\[110000\]", l) for p in pages for l in p.lines)
-            and any(re.match(r"^\[210000\]", l) for p in pages for l in p.lines))
+            and bool(codes & set(_BS_CODES)) and bool(codes & set(_PNL_CODES)))
 
 
 @dataclass
@@ -204,10 +208,11 @@ def _sections(lines):
     return sections
 
 
-def _main_table(sections, code, must):
-    for t in sections.get(code, ("", []))[1]:
-        if any(re.search(must, r.label, re.I) for r in t.rows if r.values):
-            return t
+def _main_table(sections, codes, must):
+    for code in codes:
+        for t in sections.get(code, ("", []))[1]:
+            if any(re.search(must, r.label, re.I) for r in t.rows if r.values):
+                return t
     return None
 
 
@@ -272,8 +277,8 @@ def read(pages):
     """-> (ExtractionResult, MappingResult) for an XBRL rendering."""
     lines = _content_lines(pages)
     sections = _sections(lines)
-    bs = _main_table(sections, "110000", r"^total assets")
-    pnl = _main_table(sections, "210000", r"^revenue from operations|^total income")
+    bs = _main_table(sections, _BS_CODES, r"^total assets")
+    pnl = _main_table(sections, _PNL_CODES, _PNL_MUST)
     if bs is None or pnl is None:
         raise ValueError("This looks like an AOC-4 XBRL statement, but its Balance Sheet or Profit & Loss could not be read.")
     unit = next((m for _, l in lines if (m := _UNIT.search(l))), None)
@@ -292,14 +297,14 @@ def read(pages):
                 values = {fy: v for fy, v in table.values_of(r).items() if fy in fy_columns}
                 rows.append(ExtractedRow(r.page, statement, r.heading, "", "", r.label, values, r.label, r.is_total))
     for p in pages:
-        if any(re.match(r"^\[110000\]", l) for l in p.lines):
+        if any(re.match(rf"^\[(?:{'|'.join(_BS_CODES)})\]", l) for l in p.lines):
             p.page_type = "BS"
-        elif any(re.match(r"^\[210000\]", l) for l in p.lines):
+        elif any(re.match(rf"^\[(?:{'|'.join(_PNL_CODES)})\]", l) for l in p.lines):
             p.page_type = "P&L"
     extraction = ExtractionResult(rows, fy_columns, mult, unit_label, pages,
                                   checks=[f"AOC-4 XBRL statements{(' of ' + company) if company else ''}: read by section "
-                                          "(Balance sheet [110000], Profit and loss [210000], notes [500100], "
-                                          "changes in equity [400200])."],
+                                          "(Balance sheet, Profit and loss, notes on income and expenses, "
+                                          "changes in equity / reserves)."],
                                   warnings=[], whole_units=False)
     extraction.xbrl = sections
     return extraction, map_xbrl(extraction, mult)
@@ -307,15 +312,21 @@ def read(pages):
 
 def _soce(sections, fy_columns, pat):
     """(opening Other equity of the earliest year | None, {fy: movements other than profit})"""
-    table = _main_table(sections, "400200", r"other equity at end of period")
+    table = _main_table(sections, _EQUITY_CODES, r"other equity at end of period|reserves at end of period")
     if table is None:
         return None, {}
-    end = next((r for r in table.rows if r.values and re.search(r"other equity at end of period", r.label, re.I)), None)
-    change = next((r for r in table.rows if r.values and re.search(r"total increase \(decrease\) in equity", r.label, re.I)), None)
+    end = next((r for r in table.rows if r.values and re.search(r"(?:other equity|reserves) at end of period", r.label, re.I)), None)
+    change = next((r for r in table.rows if r.values and re.search(r"total increase \(decrease\) in equity|total changes in reserves",
+                                                                    r.label, re.I)), None)
     profit = next((r for r in table.rows if r.values and re.search(r"^profit \(loss\) for period", r.label, re.I)), None)
     earliest = min(fy_columns, key=lambda f: int(f[2:]))
     before = f"FY{int(earliest[2:]) - 1:02d}"
     opening = table.values_of(end).get(before) if end is not None else None
+    if opening is None and end is not None and change is not None:
+        # no balance printed for the day before the earliest year: closing less the year's change
+        closing, changed = table.values_of(end).get(earliest), table.values_of(change, kinds=("D",)).get(earliest)
+        if closing is not None and changed is not None:
+            opening = closing - changed
     moves = {}
     if change is not None:
         d_change = table.values_of(change, kinds=("D",))
@@ -330,11 +341,11 @@ def map_xbrl(extraction, multiplier=None):
     mult = extraction.unit_multiplier if multiplier is None else multiplier
     fy = list(extraction.fy_columns)
     sections = extraction.xbrl
-    bs = _main_table(sections, "110000", r"^total assets")
-    pnl = _main_table(sections, "210000", r"^revenue from operations|^total income")
+    bs = _main_table(sections, _BS_CODES, r"^total assets")
+    pnl = _main_table(sections, _PNL_CODES, _PNL_MUST)
     # the section may open with small tables ("Disclosure of other operating revenues"): the breakup is the
     # table holding the most of the group headings
-    candidates = sections.get("500100", ("", []))[1]
+    candidates = [t for code in _NOTE_CODES for t in sections.get(code, ("", []))[1]]
     notes = max(candidates, default=None, key=lambda t: sum(
         1 for r in t.rows if not r.values and any(re.search(h, r.label, re.I) for h, _, _ in _PNL_GROUPS)))
     groups = _note_groups(notes)
@@ -368,7 +379,7 @@ def map_xbrl(extraction, multiplier=None):
             elif re.match(r"^equity and liabilities$", r.label, re.I):
                 assets_side = False
             continue
-        if r.is_total or re.search(r"^other equity$|non controlling interest|equity attributable", r.label, re.I):
+        if r.is_total or re.search(r"^other equity$|^reserves and surplus$|^non controlling interest$|equity attributable", r.label, re.I):
             continue
         values = bs.values_of(r)
         if all(not values.get(y) for y in fy):
@@ -377,7 +388,7 @@ def map_xbrl(extraction, multiplier=None):
         add_with_breakdown(bs, r, "BS", r.heading, base)
 
     # ---- Other equity: opening balance and movements from the statement of changes in equity
-    other_equity = next((r for r in bs.rows if r.values and re.match(r"^other equity$", r.label, re.I)), None)
+    other_equity = next((r for r in bs.rows if r.values and re.match(r"^other equity$|^reserves and surplus$", r.label, re.I)), None)
     pat_row = next((r for r in pnl.rows if r.values and re.match(r"^total profit \(loss\) for period$", r.label, re.I)), None)
     pat = pnl.values_of(pat_row) if pat_row is not None else {}
     opening, moves = _soce(sections, fy, pat)
@@ -409,18 +420,37 @@ def map_xbrl(extraction, multiplier=None):
                               f"{oe[y]:,.2f}.")
 
     # ---- Statement of profit and loss
+    below_total = False                 # past 'Total expenses': prior period / exceptional items, minority interest
     for r in pnl.rows:
         if not r.values:
             continue
         low = r.label.lower()
+        if re.match(r"^total expenses", low):
+            below_total = True
+            continue
+        if re.match(r"^total profit before tax", low):
+            below_total = False          # tax lines follow
+            continue
         if re.match(r"^total profit \(loss\) for period$", low):
             break
-        if r.is_total or _SUMMARY_LINE.search(r.label) or "comprehensive income" in low:
+        if re.search(r"minority interest|non.?controlling", low) and not re.search(r"before", low):
+            # consolidated (Indian GAAP): the minority's share comes off the group's profit; the owners' profit
+            # is what the reserves take, so the share is a line of the P&L (as the difference the PDF prints)
+            before = next((x for x in pnl.rows if x.values and re.search(r"before minority interest", x.label, re.I)), None)
+            if before is not None and pat:
+                b = pnl.values_of(before)
+                share = {y: pat[y] - b[y] for y in fy if pat.get(y) is not None and b.get(y) is not None}
+                it = item("Share of loss / (profit) of minority interest", share, "P&L", r.heading, r.page)
+                it.statement_tag, it.category, it.confidence = "", "Other Income", "Matched"
+                it.flags = [f for f in it.flags if f != "unplaced"] + ["minority_interest", "below_total_expenses"]
+                result.items.append(it)
+            continue
+        if r.is_total or (_SUMMARY_LINE.search(r.label) and not _PNL_ITEM_BELOW.search(r.label))                 or "comprehensive income" in low:
             continue
         values = pnl.values_of(r)
         if all(not values.get(y) for y in fy):
             continue
-        base = item(r.label, values, "P&L", r.heading, r.page)
+        base = item(r.label, values, "P&L", r.heading, r.page, ["below_total_expenses"] if below_total else [])
         face_values = values
         group = next((rows for pattern, rows in groups.items() if re.search(pattern, r.label, re.I)), None)
         if group:

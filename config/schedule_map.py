@@ -22,6 +22,7 @@ so it is included in the schedule total and every statement downstream.
 """
 
 import json
+import re
 from pathlib import Path
 
 _LAYOUT_PATH = Path(__file__).with_name("schedule_layout.json")
@@ -43,6 +44,21 @@ FY_COLUMN_MAP = {
     "FY25": "F",
     "FY26": "G",
 }
+
+
+
+def column_map(fy_columns):
+    """
+    {FY: template column} for the years being written. The template has five year columns (C..G), labelled
+    FY22..FY26; when the years do not fit there (an FY2019-20 filing), the five columns start at the earliest
+    year instead (from the latest five when the years span more) and the workbook's year headings say so.
+    """
+    nums = sorted({int(f[2:]) for f in fy_columns if re.fullmatch(r"FY\d\d", f or "")})
+    if not nums or {f"FY{n:02d}" for n in nums} <= set(FY_COLUMN_MAP):
+        return dict(FY_COLUMN_MAP)
+    start = max(nums[0], nums[-1] - (len(FY_COLUMN_MAP) - 1))
+    return {f"FY{(start + i) % 100:02d}": col for i, col in enumerate(FY_COLUMN_MAP.values())}
+
 
 ALL_SCHEDULES = _layout["schedules"]
 ALL_SCHEDULE_ORDER = _layout["order"]

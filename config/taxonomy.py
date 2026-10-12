@@ -238,11 +238,12 @@ BS_ALIASES = [
     (r"provisions?,?\s*non.?current", "tag", "Long-term Provisions", "Provision for gratuity"),
     (r"provisions?,?\s*current|current\s*tax\s*liabilit", "tag", "Short-term Provisions", "Provision for expenses"),
     (r"disposal\s*group|liabilit\w*.{0,40}held\s*for\s*sale", "tag", "Current Liability - Other", "Other payables"),
-    (r"other\s*(?:non.?)?(?:current\s*)?financial\s*liabilit|other\s*non.?current\s*liabilit", "tag", "Current Liability - Other", "Other payables"),
+    (r"other\s*(?:non.?)?(?:current\s*)?financial\s*liabilit|other\s*(?:non.?current|long.?term)\s*liabilit", "tag", "Current Liability - Other", "Other payables"),
     (r"loans?,?\s*non.?current|other\s*non.?current\s*financial\s*assets?", "tag", "Long-term Loans & Advances", "Security deposits"),
     (r"loans?,?\s*current", "tag", "Short-term Loans & Advances", "Advance to employees"),
     (r"held\s*for\s*sale|other\s*current\s*financial\s*assets?|current\s*tax\s*assets?|income\s*tax\s*assets?", "tag", "Current Asset - Other", "Prepaid exp."),
     (r"right.of.use|goodwill|investment\s*propert", "tag", "Fixed Assets", "Property, plant and equipments"),
+    (r"minority\s*interest|non.?controlling\s*interest", "tag", "Current Liability - Other", "Other payables"),
     (r"securities\s*premium", "tag", "Securities Premium", ""),
     (r"share\s*capital|equity\s*shares?|paid.?up|fixed\s*capital", "tag", "Paid-up Share Capital", ""),
     (r"def+er+ed\s*tax\s*liabilit", "tag", "Deferred Tax Liabilities", ""),
@@ -267,7 +268,7 @@ PNL_ALIASES = [
     (r"revenue\s*from\s*operations?|sale\s*of\s*(products?|goods|services)|^sales?\b|sales\s*manufactur", "tag", "Revenue", "Sale of goods"),
     (r"other\s*income|discounts?\s*received|interest\s*(income|received)|miscellaneous\s*income"
      r"|^\W*(?:add\W.{0,12})?(?:profit|gain)\W*(?:\(?loss\)?\W*)?on\s+(?:the\s+)?(?:sale|discard|disposal|redemption)"
-     r"|prior\s*period\s*income", "category", "Other Income", "Miscellaneous Income"),
+     r"|prior\s*period\s*(?:income|items?)", "category", "Other Income", "Miscellaneous Income"),
     (r"changes?\s*in\s*inventor", "tag", "Change in Inventories", ""),
     (r"cost\s*of\s*(raw\s*)?materials?|materials?\s*consumed|purchases?\b|opening\s*stock|closing\s*stock", "category", "Direct Expenses / COGS", "Cost of raw materials"),
     (r"remuneration\s*to\s*(partners?|directors?)|(partners?|directors?)[\s'’]*remuneration|managerial\s*remuneration", "category", "Employee Benefit Expenses", "Directors remuneration"),

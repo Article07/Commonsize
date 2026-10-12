@@ -8,13 +8,16 @@ sheet), review what was read, and download a Common Size workbook built on the
 firm's Reference file. Everything is rule-based; no AI service is called.
 """
 
+import hashlib
 import hmac
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from config.schedule_map import FY_COLUMN_MAP
 import ui
@@ -30,12 +33,46 @@ NOT_PLACED = "(not placed)"
 
 
 # ----------------------------------------------------------------------------- password gate
+# A refresh starts a new Streamlit session, so being signed in is also kept in a browser cookie: an expiry time
+# signed with APP_PASSWORD (changing the password signs everyone out; the cookie cannot be made without it).
+AUTH_COOKIE = "commonsize_auth"
+AUTH_HOURS = 12
+
+
+def _auth_token(secret, expiry):
+    sig = hmac.new(secret.encode(), f"commonsize|{expiry}".encode(), hashlib.sha256).hexdigest()
+    return f"{expiry}.{sig}"
+
+
+def _cookie_valid(secret):
+    token = st.context.cookies.get(AUTH_COOKIE, "")
+    expiry, _, _ = token.partition(".")
+    if not expiry.isdigit() or int(expiry) < time.time():
+        return False
+    return hmac.compare_digest(token, _auth_token(secret, int(expiry)))
+
+
+def _set_auth_cookie(value, max_age):
+    """Writes the cookie from the page (Streamlit cannot set cookies from the server)."""
+    components.html(
+        f"<script>window.parent.document.cookie = '{AUTH_COOKIE}={value}; path=/; max-age={max_age}; "
+        f"SameSite=Strict' + (window.parent.location.protocol === 'https:' ? '; Secure' : '');</script>",
+        height=0)
+
+
 def _gate():
     expected = os.environ.get("APP_PASSWORD", "")
     if not expected:
         st.error("APP_PASSWORD is not set on the server, so the app is locked. Ask the administrator to set it.")
         st.stop()
-    if st.session_state.get("authed"):
+    if st.session_state.get("signed_out"):
+        _set_auth_cookie("", 0)                 # clear it in the browser
+        st.session_state.pop("signed_out")
+    elif st.session_state.get("authed") or _cookie_valid(expected):
+        st.session_state["authed"] = True
+        if not _cookie_valid(expected):
+            expiry = int(time.time()) + AUTH_HOURS * 3600
+            _set_auth_cookie(_auth_token(expected, expiry), AUTH_HOURS * 3600)
         return
     ui.login_styles()
     left, right = st.columns([1.15, 1], gap="large", vertical_alignment="center")
@@ -284,6 +321,12 @@ def _suggestions(data, items, fy_cols):
 # ----------------------------------------------------------------------------- app
 _gate()
 ui.header()
+_, signout = st.columns([8, 1])
+with signout:
+    if st.button("Sign out", key="sign_out", width="stretch"):
+        st.session_state["authed"] = False
+        st.session_state["signed_out"] = True
+        st.rerun()
 ui.hero("Common Size, prepared from the financial statements",
         "Upload a company's financials as PDFs (digital or scanned) or Excel files, one or several years at once. "
         "The app reads them, classifies every line, checks that the balance sheet tallies and the income statement "

@@ -58,6 +58,7 @@ class Table:
     columns: list                     # [("I" | "D", "FY24")] instant / duration, left to right
     rows: list = field(default_factory=list)
     footnotes: dict = field(default_factory=dict)   # letter -> [(name, value)]
+    open: list = field(default_factory=list)        # headings not yet closed by their total, innermost last
 
     def values_of(self, row, kinds=None):
         """{FY: value} of the first columns of the given kinds (a row omits columns it has no value for)."""
@@ -190,6 +191,7 @@ def _sections(lines):
         if line.lower().endswith("[abstract]"):
             heading = re.sub(r"\s*\[abstract\]$", "", line, flags=re.I)
             table.rows.append(Row(heading, [], heading, page))       # a heading marker (no values)
+            table.open.append(heading)
             pending = None
             continue
         if _NOT_A_ROW.search(line):
@@ -202,10 +204,36 @@ def _sections(lines):
         if not values:
             pending = label
             continue
-        heading = next((r.heading for r in reversed(table.rows) if not r.values), "")
-        table.rows.append(Row(label, values, heading, page, bool(re.match(r"^total\b", label, re.I))))
+        heading = table.open[-1] if table.open else ""
+        is_total = bool(re.match(r"^total\b", label, re.I))
+        table.rows.append(Row(label, values, heading, page, is_total))
+        if is_total and heading and _closes(label, heading):
+            # the group's total: lines after it (a "CSR expenditure" below depreciation) are not part of it
+            table.open.pop()
     close_footnotes()
     return sections
+
+
+def _closes(total, heading):
+    """'Total depreciation, depletion and amortisation expense' closes 'Depreciation, depletion and amortisation expense'."""
+    def words(text):
+        return re.findall(r"[a-z]+", re.sub(r"^(?:total|disclosure of|breakup of)\s+", "", text.lower()))
+    h, t = words(heading), words(total)
+    n = min(2, len(h))
+    return n > 0 and t[:n] == h[:n]
+
+
+def _printed(pages, value, mult):
+    """True when the amount appears as a figure anywhere in the document (any digit grouping)."""
+    for target in {round(value), round(value * mult)}:
+        digits = str(abs(target))
+        if len(digits) < 4:
+            continue
+        for p in pages:
+            for line in p.lines:
+                if re.search(rf"(?<![\d.]){digits}(?![\d])", line.replace(",", "")):
+                    return True
+    return False
 
 
 def _main_table(sections, codes, must):
@@ -231,7 +259,8 @@ def _breakdown(table, row, fy_columns):
         if not pairs or abs(sum(x for _, x in pairs) - v) > TOL + 0.005 * len(pairs):
             return None
         for name, x in pairs:
-            out.setdefault(name, {})[fy] = x
+            part = out.setdefault(name, {})
+            part[fy] = part.get(fy, 0.0) + x       # a name can be listed twice ("Obsolete Stock : 15842 Obsolete Stock : 0")
     return {n: v for n, v in out.items() if any(v.values())} or None
 
 
@@ -331,8 +360,14 @@ def _soce(sections, fy_columns, pat):
     if change is not None:
         d_change = table.values_of(change, kinds=("D",))
         d_profit = table.values_of(profit, kinds=("D",)) if profit is not None else pat
+        ends = table.values_of(end) if end is not None else {}
         for fy in fy_columns:
-            if d_change.get(fy) is not None:
+            prev = f"FY{int(fy[2:]) - 1:02d}"
+            if ends.get(fy) is not None and ends.get(prev) is not None:
+                # closing less opening: also catches a reserve whose balance is printed without a movement line
+                # (a foreign currency translation reserve that is not in "Total changes in reserves")
+                moves[fy] = ends[fy] - ends[prev] - (d_profit.get(fy) or 0.0)
+            elif d_change.get(fy) is not None:
                 moves[fy] = d_change[fy] - (d_profit.get(fy) or 0.0)
     return opening, moves
 
@@ -398,26 +433,50 @@ def map_xbrl(extraction, multiplier=None):
         opening = oe[earliest] - pat[earliest] - (moves.get(earliest) or 0.0)
         result.log.append("WARNING: the statement of changes in equity could not be read; the opening Other equity is "
                           "worked back from the balance sheet and the profit.")
-    if opening is not None:
-        it = item("Other equity - opening balance", {earliest: opening}, "BS", "Other equity", None, source="pdf-note")
-        it.statement_tag, it.category, it.is_new, it.confidence = "Opening Reserves", "", False, "Matched"
-        it.flags = [f for f in it.flags if f != "unplaced"]
-        result.items.append(it)
-    if any(abs(v) > 1e-9 for v in moves.values()):
-        it = item("Other changes in equity (statement of changes in equity)", moves, "BS", "Other equity", None,
-                  source="pdf-note")
-        it.statement_tag, it.category, it.is_new, it.confidence = "Reserves Adjustments", "", False, "Matched"
-        it.flags = [f for f in it.flags if f != "unplaced"]
-        result.items.append(it)
+    elif opening is not None and oe.get(earliest) is not None and pat.get(earliest) is not None:
+        implied = oe[earliest] - pat[earliest] - (moves.get(earliest) or 0.0)
+        if abs(implied - opening) > TOL and _printed(extraction.pages, implied, mult):
+            # the filing's opening does not roll forward to its balance sheet, while the reserves note's own text
+            # prints the opening that does ("As per last Balance Sheet ..."): last year's closing was restated
+            result.log.append(f"WARNING: the opening Other equity in the filing's tables ({opening:,.2f}) does not roll "
+                              f"forward to the balance sheet's {earliest} figure; the opening its reserves note prints, "
+                              f"{implied:,.2f}, is used.")
+            opening = implied
+    restated = {}
     years = sorted(fy, key=lambda f: int(f[2:]))
     running = opening
     for y in years:
         if running is None or pat.get(y) is None or oe.get(y) is None:
             break
-        running = running + pat[y] + (moves.get(y) or 0.0)
-        if abs(running - oe[y]) > TOL:
-            result.log.append(f"WARNING: Other equity for {y} rolls forward to {running:,.2f} but the balance sheet shows "
-                              f"{oe[y]:,.2f}.")
+        expected = running + pat[y] + (moves.get(y) or 0.0)
+        if abs(expected - oe[y]) > TOL and y != earliest and _printed(extraction.pages, running + oe[y] - expected, mult):
+            # the year opens on a restated balance the reserves note prints, not on last year's closing
+            restated[y] = oe[y] - expected
+            result.log.append(f"WARNING: {y} opens Other equity at {running + restated[y]:,.2f} as its reserves note "
+                              f"prints, not at last year's closing {running:,.2f}; the difference is shown as a "
+                              f"separate movement.")
+        elif abs(expected - oe[y]) > TOL:
+            result.log.append(f"WARNING: Other equity for {y} rolls forward to {expected:,.2f} but the balance sheet "
+                              f"shows {oe[y]:,.2f}.")
+        running = oe[y] if y in restated else expected
+    if opening is not None:
+        # later years open on last year's balance sheet figure (the roll-forward uses the previous closing, so
+        # these only matter when a year is taken on its own: a later year of a multi-file combination)
+        openings = {earliest: opening}
+        for prev, y in zip(years, years[1:]):
+            if oe.get(prev) is not None:
+                openings[y] = oe[prev]
+        it = item("Other equity - opening balance", openings, "BS", "Other equity", None, source="pdf-note")
+        it.statement_tag, it.category, it.is_new, it.confidence = "Opening Reserves", "", False, "Matched"
+        it.flags = [f for f in it.flags if f != "unplaced"]
+        result.items.append(it)
+    for label, values in (("Other changes in equity (statement of changes in equity)", moves),
+                          ("Opening reserves restated (differs from last year's closing)", restated)):
+        if any(abs(v) > 1e-9 for v in values.values()):
+            it = item(label, values, "BS", "Other equity", None, source="pdf-note")
+            it.statement_tag, it.category, it.is_new, it.confidence = "Reserves Adjustments", "", False, "Matched"
+            it.flags = [f for f in it.flags if f != "unplaced"]
+            result.items.append(it)
 
     # ---- Statement of profit and loss
     below_total = False                 # past 'Total expenses': prior period / exceptional items, minority interest
@@ -434,15 +493,32 @@ def map_xbrl(extraction, multiplier=None):
         if re.match(r"^total profit \(loss\) for period$", low):
             break
         if re.search(r"minority interest|non.?controlling", low) and not re.search(r"before", low):
-            # consolidated (Indian GAAP): the minority's share comes off the group's profit; the owners' profit
-            # is what the reserves take, so the share is a line of the P&L (as the difference the PDF prints)
+            # consolidated (Indian GAAP): after the group's profit come the minority's share and the share of
+            # associates; the owners' profit is what the reserves take, so both are lines of the P&L (together the
+            # difference the PDF prints between the two profits)
             before = next((x for x in pnl.rows if x.values and re.search(r"before minority interest", x.label, re.I)), None)
             if before is not None and pat:
                 b = pnl.values_of(before)
-                share = {y: pat[y] - b[y] for y in fy if pat.get(y) is not None and b.get(y) is not None}
-                it = item("Share of loss / (profit) of minority interest", share, "P&L", r.heading, r.page)
+                assoc_row = next((x for x in pnl.rows if x.values and re.search(r"share of profit.{0,12}associates?", x.label, re.I)), None)
+                assoc = pnl.values_of(assoc_row) if assoc_row is not None else {}
+                total = {y: pat[y] - b[y] for y in fy if pat.get(y) is not None and b.get(y) is not None}
+                lines = (("Share of profit / (loss) of associates", {y: assoc.get(y) or 0.0 for y in total}),
+                         ("Share of loss / (profit) of minority interest", {y: total[y] - (assoc.get(y) or 0.0) for y in total}))
+                for name, share in lines:
+                    if all(abs(v) < TOL for v in share.values()):
+                        continue
+                    it = item(name, share, "P&L", r.heading, r.page)
+                    it.statement_tag, it.category, it.confidence = "", "Other Income", "Matched"
+                    it.flags = [f for f in it.flags if f != "unplaced"] + ["minority_interest", "below_total_expenses"]
+                    result.items.append(it)
+            continue
+        if re.match(r"^(?:exceptional|extraordinary) items", low):
+            # added to the profit before them (a gain positive, a loss negative), like prior period items
+            values = pnl.values_of(r)
+            if any(values.get(y) for y in fy):
+                it = item(r.label, values, "P&L", r.heading, r.page, ["below_total_expenses"])
                 it.statement_tag, it.category, it.confidence = "", "Other Income", "Matched"
-                it.flags = [f for f in it.flags if f != "unplaced"] + ["minority_interest", "below_total_expenses"]
+                it.flags = [f for f in it.flags if f != "unplaced"]
                 result.items.append(it)
             continue
         if r.is_total or (_SUMMARY_LINE.search(r.label) and not _PNL_ITEM_BELOW.search(r.label))                 or "comprehensive income" in low:

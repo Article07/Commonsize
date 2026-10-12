@@ -151,4 +151,46 @@ def combine(sources):
             for fy in years:
                 if fy in item.alt_values:
                     target.alt_values[fy] = item.alt_values[fy]
-    return Combined([merged[k] for k in order], all_fys, owner, warnings)
+    items = [merged[k] for k in order]
+    _bridge_restatements(sources, items, all_fys, owner, owner_by, warnings)
+    return Combined(items, all_fys, owner, warnings)
+
+
+def _tolerance(source):
+    from core.pipeline import tolerance
+    return tolerance(source.mult, bool(source.extraction is not None and getattr(source.extraction, "whole_units", False)))
+
+
+def _bridge_restatements(sources, items, all_fys, owner, owner_by, warnings):
+    """
+    Where a year's Balance Sheet comes from a later file than the year before, that file may print the previous
+    year's reserves restated (FY24's report showing FY23 closing reserves of 13,691.01 against 13,691.04 in FY23's
+    own report). The year opens on the restated figure, so the difference is added as a labelled reserves movement
+    of that year rather than left as a Balance Sheet gap.
+    """
+    from core.models import LineItem
+    from core.statements import compute_statements
+    for prev, fy in zip(all_fys, all_fys[1:]):
+        i, j = owner_by.get((fy, "BS"), owner[fy]), owner_by.get((prev, "BS"), owner[prev])
+        src = sources[i]
+        if i == j or src.extraction is None or prev not in src.fy_cols:
+            continue
+        if not any(it.statement == "BS" and it.fy_values.get(prev) for it in src.items):
+            continue
+        own = compute_statements(src.items, sorted(src.fy_cols, key=fy_key))[0]
+        before = sources[j]
+        earlier = compute_statements(before.items, sorted(before.fy_cols, key=fy_key))[0] if before.fy_cols else {}
+        # only between two files that each tally for that year: a gap from a misread figure is not a restatement
+        if prev not in earlier or not all(abs(st[prev]["gap"]) <= _tolerance(x) for st, x in ((own, src), (earlier, before))):
+            continue
+        combined = compute_statements(items, all_fys)[0]
+        diff = own[fy]["opening_reserves"] - combined[fy]["opening_reserves"]
+        if abs(diff) < 0.5:
+            continue
+        items.append(LineItem("BS", f"Reserves restated in {src.name} ({prev} closing differs from {sources[j].name})",
+                              "Reserves Adjustments", {y: (diff if y == fy else None) for y in all_fys},
+                              confidence="Matched", source="pdf-note", pdf_heading="Reserves and surplus",
+                              flags=["restated_opening"]))
+        warnings.append(f"{src.name} shows {prev} closing reserves {diff:+,.2f} (rupees) different from "
+                        f"{sources[j].name}; {fy} opens on its restated figure and the difference is shown as a "
+                        f"reserves movement of {fy}.")

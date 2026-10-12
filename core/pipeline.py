@@ -156,6 +156,9 @@ def reconcile(extraction, items, fy_columns):
     -> list of dict(year, line, computed, reported, diff, ok). Lines the input does not show are left out.
     """
     fys = [fy for fy in sorted(fy_columns, key=lambda f: int(f[2:])) if fy in column_map(fy_columns)]
+    # checked on its own, a file's first year opens on the reserves it prints itself, which already include a
+    # restatement the combination bridges from the previous file
+    items = [i for i in items if not ("restated_opening" in i.flags and fys and i.fy_values.get(fys[0]))]
     result = check(items, fys, extraction.unit_multiplier, extraction.whole_units)
     tol = tolerance(extraction.unit_multiplier, extraction.whole_units)
     pat = reported_pat(extraction)

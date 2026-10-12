@@ -265,7 +265,7 @@ BS_ALIASES = [
 ]
 
 PNL_ALIASES = [
-    (r"revenue\s*from\s*operations?|sale\s*of\s*(products?|goods|services)|^sales?\b|sales\s*manufactur", "tag", "Revenue", "Sale of goods"),
+    (r"revenue\s*from\s*operations?|other\s*operating\s*(?:revenues?|income)|sale\s*of\s*(products?|goods|services)|^sales?\b|sales\s*manufactur", "tag", "Revenue", "Sale of goods"),
     (r"other\s*income|discounts?\s*received|interest\s*(income|received)|miscellaneous\s*income"
      r"|^\W*(?:add\W.{0,12})?(?:profit|gain)\W*(?:\(?loss\)?\W*)?on\s+(?:the\s+)?(?:sale|discard|disposal|redemption)"
      r"|prior\s*period\s*(?:income|items?)", "category", "Other Income", "Miscellaneous Income"),
@@ -281,6 +281,7 @@ PNL_ALIASES = [
     (r"depreciation|amorti[sz]ation", "tag", "Depreciation", "Depreciation"),
     (r"tax\s*adjust|tax.{0,25}(earlier|prior|previous)\s*years?|short\s*provision.{0,15}tax", "tag", "Tax Expense", "Others"),
     (r"tax\s*expense|current\s*tax|deferred\s*tax|previous\s*year\s*tax|income\s*tax\s*(expense|provision)", "tag", "Tax Expense", "Current tax"),
+    (r"\bcsr\b|corporate\s*social\s*responsibilit", "category", "Administrative Expenses", "Donation"),
     (r"selling|distribution|marketing|advertis", "category", "Selling & Distribution Expenses", "Business promotion"),
     (r"direct\s*expenses?|manufacturing|production|factory", "category", "Direct Expenses / COGS", "Manufacturing expenses"),
     (r"other\s*expenses?|administrative|general\s*expenses?|miscellaneous", "category", "Administrative Expenses", "Other admin expenses"),

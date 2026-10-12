@@ -147,8 +147,9 @@ def _review_table(items, fy_cols, mult, unit_label, key):
     return final
 
 
-def _balance_panel(items, fy_cols, mult, unit_label, whole_units=False):
-    result = pipeline.check(items, fy_cols, mult, whole_units)
+def _balance_panel(items, fy_cols, mult, unit_label, whole_units=False, tol_mult=None):
+    # files in different units (rupees and lakhs): rounding of the coarsest one is not a failure
+    result = pipeline.check(items, fy_cols, tol_mult or mult, whole_units)
     worst = max((abs(y.gap) for y in result.years), default=0.0)
     ui.cards([
         ("Years checked", ", ".join(y.fy for y in result.years), ""),
@@ -410,6 +411,7 @@ if readable:
 mult, unit = data["mult"], data["unit"]
 # figures printed in whole units (e.g. whole Rs. '000) get a whole-unit rounding allowance in the checks
 whole_units = any(s.extraction is not None and s.extraction.whole_units for s in sources)
+tol_mult = max((s.mult for s in sources), default=None)
 
 if len(sources) > 1:
     by_file = {}
@@ -476,12 +478,12 @@ if existing:
         _stop()
     for w in warns:
         st.warning(w)
-    _balance_panel(merged, all_cols, mult, unit, whole_units)
+    _balance_panel(merged, all_cols, mult, unit, whole_units, tol_mult)
     _generate(merged, all_cols, company or existing.company, equity, reported,
               f"{(company or existing.company)} - Common Size.xlsx")
 else:
     _suggestions(data, items, review_cols)
-    _balance_panel(items, review_cols, mult, unit, whole_units)
+    _balance_panel(items, review_cols, mult, unit, whole_units, tol_mult)
     _reconciliation_panel(data, items, review_cols, mult, unit)
     _generate(items, review_cols, company or "Company", equity, reported_all, f"{company or 'Company'} - Common Size.xlsx")
 ui.footer()

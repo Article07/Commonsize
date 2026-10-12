@@ -332,7 +332,11 @@ def map_xbrl(extraction, multiplier=None):
     sections = extraction.xbrl
     bs = _main_table(sections, "110000", r"^total assets")
     pnl = _main_table(sections, "210000", r"^revenue from operations|^total income")
-    notes = next(iter(sections.get("500100", ("", []))[1]), None)
+    # the section may open with small tables ("Disclosure of other operating revenues"): the breakup is the
+    # table holding the most of the group headings
+    candidates = sections.get("500100", ("", []))[1]
+    notes = max(candidates, default=None, key=lambda t: sum(
+        1 for r in t.rows if not r.values and any(re.search(h, r.label, re.I) for h, _, _ in _PNL_GROUPS)))
     groups = _note_groups(notes)
     result = MappingResult()
 

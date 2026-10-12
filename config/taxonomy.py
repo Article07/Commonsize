@@ -238,7 +238,7 @@ BS_ALIASES = [
     (r"provisions?,?\s*non.?current", "tag", "Long-term Provisions", "Provision for gratuity"),
     (r"provisions?,?\s*current|current\s*tax\s*liabilit", "tag", "Short-term Provisions", "Provision for expenses"),
     (r"disposal\s*group|liabilit\w*.{0,40}held\s*for\s*sale", "tag", "Current Liability - Other", "Other payables"),
-    (r"other\s*(?:non.?current\s*)?financial\s*liabilit|other\s*non.?current\s*liabilit", "tag", "Current Liability - Other", "Other payables"),
+    (r"other\s*(?:non.?)?(?:current\s*)?financial\s*liabilit|other\s*non.?current\s*liabilit", "tag", "Current Liability - Other", "Other payables"),
     (r"loans?,?\s*non.?current|other\s*non.?current\s*financial\s*assets?", "tag", "Long-term Loans & Advances", "Security deposits"),
     (r"loans?,?\s*current", "tag", "Short-term Loans & Advances", "Advance to employees"),
     (r"held\s*for\s*sale|other\s*current\s*financial\s*assets?|current\s*tax\s*assets?|income\s*tax\s*assets?", "tag", "Current Asset - Other", "Prepaid exp."),

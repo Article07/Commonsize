@@ -176,11 +176,14 @@ def reconcile(extraction, items, fy_columns):
         if fy in pat:
             out.append(dict(year=fy, line="Profit for the year", computed=s["pat"], reported=pat[fy]))
         liab, assets = _bs_totals(extraction, fy)
-        total_liab = s["liabilities_side"] + s["current_liabilities"] + max(-s["deferred_tax_net"], 0.0)
+        # deferred tax as printed: an asset and a liability can both appear (the statements net them)
+        dta, dtl = s["sched"]["Deferred Tax Assets"][fy], s["sched"]["Deferred Tax Liabilities"][fy]
+        total_liab = s["liabilities_side"] + s["current_liabilities"] + dtl
+        total_assets = s["total_assets"] - max(s["deferred_tax_net"], 0.0) + dta
         if liab is not None:
             out.append(dict(year=fy, line="Total equity and liabilities", computed=total_liab, reported=liab))
         if assets is not None:
-            out.append(dict(year=fy, line="Total assets", computed=s["total_assets"], reported=assets))
+            out.append(dict(year=fy, line="Total assets", computed=total_assets, reported=assets))
     for row in out:
         row["diff"] = row["computed"] - row["reported"]
         row["ok"] = abs(row["diff"]) <= tol

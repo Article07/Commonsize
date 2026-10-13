@@ -10,23 +10,23 @@ them on opening (`fullCalcOnLoad`).
 
 Where an item goes
   1. an existing row of its schedule whose label matches (taxonomy / alias name, then the PDF label);
-  2. otherwise the next hidden spare row of that schedule: the row is unhidden, labelled with the PDF's own
+  2. otherwise the next spare row of that schedule (hidden in the template): labelled with the PDF's own
      wording, highlighted yellow and given a comment naming the PDF heading and page;
   3. if the spare rows are used up, or the item could not be placed at all, a yellow block at the bottom of
      Sch. -- these are NOT part of any total, and the report says so (the balance check will show the gap).
 
-Values are written in rupees; the template divides by `curr` (INR million).
+Values are written in rupees; the template divides by `curr` (INR million). The output hides no row or
+column: the unused spare rows show blank, and year columns without data are emptied rather than hidden.
 """
 
 import re
-from copy import copy
 from dataclasses import dataclass, field
 
 import openpyxl
 from openpyxl.comments import Comment
 from openpyxl.formula.translate import Translator
 from openpyxl.styles import PatternFill
-from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils import column_index_from_string
 from rapidfuzz import fuzz
 
 from config.schedule_map import ALL_SCHEDULES, FY_COLUMN_MAP, SHEET_NAME, column_map, spare_row_numbers
@@ -247,49 +247,50 @@ def _write_change_in_inventories(ws, items, fy_columns, columns):
         ws[f"{col}{closing}"].value = max(-net, 0.0)
 
 
-def _split_column_groups(ws, upto=40):
-    """The template stores column widths as ranges (e.g. C:F); split them so one column can be hidden alone."""
-    singles = {d.min for d in ws.column_dimensions.values() if (d.min or 0) == (d.max or 0)}
-    for key, dim in list(ws.column_dimensions.items()):
-        lo = dim.min or column_index_from_string(key)
-        hi = dim.max or lo
-        if hi == lo:
+_HEADER_REF = re.compile(r"^=\$?[A-Z]{1,2}\$?6$")      # a schedule's year heading ("=D6")
+
+
+def _clear_column(ws, letter, first_row):
+    """Empties the figures and formulas of one year column, keeping labels and the schedules' year headings."""
+    col = column_index_from_string(letter)
+    for row in range(first_row, ws.max_row + 1):
+        cell = ws.cell(row, col)
+        v = cell.value
+        if v is None or (isinstance(v, str) and (not v.startswith("=") or _HEADER_REF.match(v))):
             continue
-        template = copy(dim)
-        for i in range(lo, min(hi, upto) + 1):
-            letter = get_column_letter(i)
-            if i != lo and i in singles:
-                continue
-            piece = copy(template)
-            piece.index, piece.min, piece.max = letter, i, i
-            ws.column_dimensions[letter] = piece
-        if hi > upto:
-            rest = copy(template)
-            rest.index, rest.min, rest.max = get_column_letter(upto + 1), upto + 1, hi
-            ws.column_dimensions[get_column_letter(upto + 1)] = rest
+        cell.value = None
 
 
-def _hide_unused_years(wb, fy_columns, columns):
+def _clear_unused_years(wb, fy_columns, columns):
     """
-    The template carries reserves forward into every year column, so years with no data would show a spurious
-    non-zero balance-sheet check. Years without data are hidden (unhide them, or add the year with the
-    'add a new FY' option). A cash flow needs the previous year's balance sheet, so the earliest year's
-    cash-flow column is hidden too.
+    Nothing in the workbook is hidden, so a year column without data is emptied instead: the template carries
+    reserves forward into every year column, and a year with no figures would otherwise show a spurious
+    balance-sheet check and ratios. A cash flow needs the previous year's balance sheet, so the earliest year's
+    cash-flow column is emptied too. The year headings stay; a later "add a new FY" rebuilds the workbook from
+    the template, so the formulas come back for the year added.
     """
-    for name in ("IS", "BS", "CF", "Ratios"):
-        _split_column_groups(wb[name])
-    letters = "CDEFG"
     years = list(columns)                            # the five years of columns C..G
-    data = [fy for fy in years if fy in fy_columns]
     for i, fy in enumerate(years):
-        has_data = fy in data
-        has_prior = has_data and i > 0 and years[i - 1] in data
-        col = letters[i]
-        for sheet, cols in (("IS", [col, "HIJKL"[i]]), ("BS", [col]), ("Ratios", ["DEFGH"[i]])):
-            for c in cols:
-                wb[sheet].column_dimensions[c].hidden = not has_data
-        if i > 0:
-            wb["CF"].column_dimensions[letters[i - 1]].hidden = not has_prior
+        has_data = fy in fy_columns
+        has_prior = has_data and i > 0 and years[i - 1] in fy_columns
+        if not has_data:
+            for sheet, letters, first_row in (("IS", ["CDEFG"[i], "HIJKL"[i]], 6), ("BS", ["CDEFG"[i]], 6),
+                                              ("Ratios", ["DEFGH"[i]], 4),
+                                              (SHEET_NAME, ["CDEFG"[i], "IJKLM"[i]] + (["OPQR"[i - 1]] if i else []), 7)):
+                for letter in letters:
+                    _clear_column(wb[sheet], letter, first_row)
+        if i > 0 and not has_prior:
+            _clear_column(wb["CF"], "CDEFG"[i - 1], 6)
+
+
+def _show_everything(wb):
+    """The output hides no sheet, row or column (the template keeps its spare schedule rows hidden)."""
+    for ws in wb.worksheets:
+        ws.sheet_state = "visible"
+        for dim in ws.row_dimensions.values():
+            dim.hidden = False
+        for dim in ws.column_dimensions.values():
+            dim.hidden = False
 
 
 def _relabel_years(wb, columns):
@@ -418,7 +419,8 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
     if report.columns != FY_COLUMN_MAP:
         _relabel_years(wb, report.columns)
     _cash_flow_share_capital(wb, ws, fy_columns, report)
-    _hide_unused_years(wb, fy_columns, report.columns)
+    _clear_unused_years(wb, fy_columns, report.columns)
+    _show_everything(wb)
     wb.calculation.fullCalcOnLoad = True   # openpyxl drops cached results; Excel recomputes on open
     wb.save(output_path)
     return report

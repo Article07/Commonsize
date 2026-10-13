@@ -186,7 +186,10 @@ def _generate(items, fy_cols, company, equity, reported, file_name):
     ui.step(4, "Download", "The workbook uses the firm's Reference format; new line items are highlighted yellow.")
     data, report = pipeline.build_workbook(items, fy_cols, company, equity or None, reported)
     for line in report.log:
-        st.warning(line) if line.startswith("WARNING") else st.info(line)
+        if line.startswith("WARNING"):
+            st.warning(line)
+        else:
+            st.info(line)
     new = report.new_rows
     if new:
         st.info(f"{len(new)} new line item(s) are highlighted yellow in the workbook (Sch. sheet): "

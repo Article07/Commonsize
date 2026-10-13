@@ -3,6 +3,10 @@ headless = true
 maxUploadSize = 100
 enableXsrfProtection = true
 
+[runner]
+# never print a bare expression's value on the page (it showed an internal object under 'Download')
+magicEnabled = false
+
 [browser]
 gatherUsageStats = false
 

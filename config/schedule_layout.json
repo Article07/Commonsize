@@ -236,8 +236,8 @@
       "spare_rows": 10
     },
     "COGS-Purchase": {
-      "title_row": 265,
-      "first_item_row": 267,
+      "title_row": 264,
+      "first_item_row": 266,
       "last_item_row": 267,
       "total_row": 271,
       "pattern": "total_last",
@@ -245,7 +245,7 @@
       "spare_rows": 0
     },
     "Opening Stock (Change in Inventories)": {
-      "title_row": 265,
+      "title_row": 264,
       "first_item_row": 269,
       "last_item_row": 269,
       "total_row": 271,
@@ -254,7 +254,7 @@
       "spare_rows": 0
     },
     "Closing Stock (Change in Inventories)": {
-      "title_row": 265,
+      "title_row": 264,
       "first_item_row": 270,
       "last_item_row": 270,
       "total_row": 271,

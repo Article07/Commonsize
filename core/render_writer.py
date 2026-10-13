@@ -37,8 +37,9 @@ YELLOW = PatternFill(fill_type="solid", start_color="FFFF00", end_color="FFFF00"
 VALUE_COLUMNS = "CDEFG"
 SPECIAL_SINGLE = {            # schedules that are a fixed input cell, values are added into it
     "Share Capital", "Securities Premium", "Reserves Adjustments",
-    "Deferred Tax Assets", "Deferred Tax Liabilities", "COGS-Purchase",
+    "Deferred Tax Assets", "Deferred Tax Liabilities",
 }
+_MATERIALS_CONSUMED = re.compile(r"materials?\s*consumed|cost\s*of\s*(?:raw\s*)?materials?", re.I)
 REVENUE_SERVICE_WORDS = ("service", "commission", "consult", "fees", "job work", "labour charges")
 
 
@@ -365,8 +366,20 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
             _write_opening_reserves(ws, item, fy_columns, report)
             report.placements.append(Placement(item.line_item, key, ALL_SCHEDULES[key]["first_item_row"], "special"))
             continue
-        if key == "COGS-Purchase" and not re.search(r"purchase", item.line_item, re.I):
-            key = "COGS-Manufacturing"   # the purchase schedule has a single fixed row
+        if key == "COGS-Purchase":
+            # two fixed rows: purchase of traded goods, then cost of materials consumed (an XBRL filing's
+            # "Cost of materials consumed" is its purchases); anything else is a direct expense
+            sched = ALL_SCHEDULES[key]
+            if _MATERIALS_CONSUMED.search(item.line_item):
+                row = sched["last_item_row"]
+            elif re.search(r"purchase", item.line_item, re.I):
+                row = sched["first_item_row"]
+            else:
+                row, key = None, "COGS-Manufacturing"
+            if row is not None:
+                _add_values(ws, row, item, fy_columns, report)
+                report.placements.append(Placement(item.line_item, key, row, "special"))
+                continue
 
         sched = ALL_SCHEDULES[key]
         if key in SPECIAL_SINGLE:

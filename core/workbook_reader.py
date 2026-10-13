@@ -23,7 +23,7 @@ PNL_SCHEDULES = {
 }
 SINGLE_CELL_SCHEDULES = {
     "Share Capital", "Securities Premium", "Reserves Adjustments", "Deferred Tax Assets", "Deferred Tax Liabilities",
-    "COGS-Purchase", "Reserves and Surplus",
+    "Reserves and Surplus",
 }
 _YELLOW = {"00FFFF00", "FFFFFF00"}
 _STOCK_ROWS = ("Opening Stock (Change in Inventories)", "Closing Stock (Change in Inventories)")

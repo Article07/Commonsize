@@ -34,6 +34,8 @@ TOL = 0.011
 _BS_CODES, _PNL_CODES = ("110000", "100100"), ("210000", "100200")
 _NOTE_CODES, _EQUITY_CODES = ("500100", "300500"), ("400200", "200200")
 _PNL_MUST = r"^revenue from|^total income|^total revenue"
+# in the XBRL statements these are the purchases (Sch. Cost of goods sold)
+_PURCHASES = re.compile(r"^\W*(?:cost of (?:raw )?materials? consumed|purchases? of stock.in.trade)", re.I)
 
 
 def is_xbrl(pages):
@@ -527,6 +529,13 @@ def map_xbrl(extraction, multiplier=None):
         if all(not values.get(y) for y in fy):
             continue
         base = item(r.label, values, "P&L", r.heading, r.page, ["below_total_expenses"] if below_total else [])
+        if _PURCHASES.match(r.label):
+            # in the XBRL statements these are the purchases: Sch. Cost of goods sold, "Cost of materials consumed"
+            # below "Purchase of traded goods" (one line each, not itemised)
+            base.schedule_override = "COGS-Purchase"
+            base.flags = [f for f in base.flags if f != "unplaced"]
+            result.items.append(base)
+            continue
         face_values = values
         group = next((rows for pattern, rows in groups.items() if re.search(pattern, r.label, re.I)), None)
         if group:
@@ -549,4 +558,10 @@ def map_xbrl(extraction, multiplier=None):
                 continue
             result.log.append(f"{r.label}: the [500100] breakup does not add up to the statement, so the statement figure is used")
         add_with_breakdown(pnl, r, "P&L", r.heading, base)
+    # a "Cost of materials consumed" filed inside another line's breakup (Other expenses) is purchases too
+    for it in result.items:
+        if it.statement == "P&L" and _PURCHASES.match(it.line_item) and it.schedule_override != "COGS-Purchase":
+            it.schedule_override = "COGS-Purchase"
+            it.flags = [f for f in it.flags if f != "unplaced"]
+            result.log.append(f"{it.line_item}: placed under purchases (Cost of goods sold)")
     return result

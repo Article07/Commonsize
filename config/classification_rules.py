@@ -127,6 +127,7 @@ STATEMENT_TAGS = [
     "Current Liability - Other",
     "Fixed Assets",
     "Investments",
+    "Current Investments",
     "Deferred Tax Assets",
     "Deferred Tax Liabilities",
     "Reserves Adjustments",

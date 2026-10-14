@@ -36,6 +36,7 @@ _BS_TAG_TO_SCHEDULE = {
     "Deferred Tax Liabilities": "Deferred Tax Liabilities",
     "Fixed Assets": "Fixed Assets",
     "Investments": "Investments",
+    "Current Investments": "Current Investments",
     "Cash & Bank": "Cash & Bank",
     "Trade Receivables": "Trade Receivables",
     "Inventory": "Inventory",

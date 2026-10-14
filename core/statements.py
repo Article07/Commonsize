@@ -26,7 +26,7 @@ SCHEDULE_NAMES = (
     "Share Capital", "Reserves and Surplus", "Securities Premium", "Other Reserves", "Reserves Adjustments",
     "Borrowings - Long Term", "Borrowings - Short Term", "Trade Payables", "Current Liability - Other",
     "Long-term Provisions", "Short-term Provisions", "Fixed Assets", "Deferred Tax Assets",
-    "Deferred Tax Liabilities", "Investments", "Cash & Bank", "Trade Receivables", "Inventory",
+    "Deferred Tax Liabilities", "Investments", "Current Investments", "Cash & Bank", "Trade Receivables", "Inventory",
     "Long-term Loans & Advances", "Short-term Loans & Advances", "Current Asset - Other",
 )
 
@@ -85,7 +85,7 @@ def compute_statements(line_items, fy_columns):
 
         fixed = t("Fixed Assets", fy)
         deferred_tax_net = t("Deferred Tax Assets", fy) - t("Deferred Tax Liabilities", fy)
-        investments, cash = t("Investments", fy), t("Cash & Bank", fy)
+        investments, cash = t("Investments", fy) + t("Current Investments", fy), t("Cash & Bank", fy)
         receivables, inventory = t("Trade Receivables", fy), t("Inventory", fy)
         current_assets = (receivables + inventory + t("Long-term Loans & Advances", fy)
                           + t("Short-term Loans & Advances", fy) + t("Current Asset - Other", fy))

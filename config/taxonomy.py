@@ -257,6 +257,7 @@ BS_ALIASES = [
     (r"trade\s*payable|sundry\s*creditors?|creditors?|msme|micro.*small", "tag", "Trade Payables", "Sundry creditors for goods"),
     (r"other\s*current\s*liabilit|statutory\s*dues|customer\s*deposits?", "tag", "Current Liability - Other", "Other payables"),
     (r"^\W*(?:freehold\s*|leasehold\s*)?propert(?:y|ies)\b(?!\s*tax)|property,?\s*plant|plant\s*(and|&)\s*equip|fixed\s*assets?|tangible|capital\s*work", "tag", "Fixed Assets", "Property, plant and equipments"),
+    (r"^(?!.*(?:non.?current|long.?term)).*(?:\bcurrent|short.?term)\s*investments?", "tag", "Current Investments", "Current investment"),
     (r"investment", "tag", "Investments", "Investment in shares"),
     (r"inventor|stock.in.trade|work.in.progress|stores\s*(and|&)\s*spares|packing\s*material|raw\s*material|finished\s*goods", "tag", "Inventory", "Finished goods"),
     (r"trade\s*receivable|sundry\s*debtors?|debtors?", "tag", "Trade Receivables", "Outstanding for a period less than six months"),

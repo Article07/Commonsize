@@ -18,6 +18,7 @@ import re
 ASSET_TAGS = {
     "Fixed Assets",
     "Investments",
+    "Current Investments",
     "Cash & Bank",
     "Trade Receivables",
     "Inventory",

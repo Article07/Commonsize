@@ -72,6 +72,10 @@ def read_workbook(path):
     removed = next((p.value for p in wb.custom_doc_props.props if p.name == REMOVED_ROWS_PROPERTY), "")
     for row in expand_ranges(removed):
         ws.insert_rows(row)
+    # made before the "Current investments" schedule (Sch. 156-160) was added: its rows from 156 on sit 5 higher
+    current = ALL_SCHEDULES["Current Investments"]["title_row"]
+    if str(ws.cell(current, 2).value or "").strip().lower() == "trade receivables":
+        ws.insert_rows(current, 5)
     # the row layout must be the current template's, else values would be read from the wrong rows
     moved = [key for key, s in ALL_SCHEDULES.items()
              if s["pattern"] == "total_last" and s["insertable"]

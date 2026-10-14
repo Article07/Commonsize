@@ -19,13 +19,17 @@ Values are written in rupees; the template divides by `curr` (INR million). The 
 column: the unused spare rows show blank, and year columns without data are emptied rather than hidden.
 """
 
+import bisect
 import re
+from copy import copy
 from dataclasses import dataclass, field
 
 import openpyxl
 from openpyxl.comments import Comment
+from openpyxl.formula.tokenizer import Tokenizer
 from openpyxl.formula.translate import Translator
-from openpyxl.styles import PatternFill
+from openpyxl.packaging.custom import StringProperty
+from openpyxl.styles import Border, PatternFill
 from openpyxl.utils import column_index_from_string
 from rapidfuzz import fuzz
 
@@ -294,6 +298,115 @@ def _show_everything(wb):
             dim.hidden = False
 
 
+REMOVED_ROWS_PROPERTY = "commonsize_removed_sch_rows"     # template rows of Sch. deleted from this workbook
+_REF = re.compile(r"(?P<sheet>(?:'[^']+'|[^'!]+)!)?(?P<c1>\$?[A-Z]{1,3})(?P<d1>\$?)(?P<r1>\d+)"
+                  r"(?::(?P<c2>\$?[A-Z]{1,3})(?P<d2>\$?)(?P<r2>\d+))?")
+
+
+def _clean_borders(ws):
+    """Only the 'Particulars' heading rows and the 'Total' rows keep their borders; item rows (including the
+    spare rows new items go into) and headings in between carry none."""
+    plain = Border()
+    for row in ws.iter_rows():
+        label = str(ws.cell(row[0].row, 2).value or "").strip().lower()
+        if label == "particulars" or label.startswith("total"):
+            # the same line under the label as under the figures (the template is uneven here)
+            ws.cell(row[0].row, 2).border = copy(ws.cell(row[0].row, 3).border)
+            continue
+        for cell in row:
+            if cell.has_style and cell.border != plain:
+                cell.border = plain
+
+
+def _compact_ranges(rows):
+    out, rows = [], sorted(rows)
+    for r in rows:
+        if out and r == out[-1][1] + 1:
+            out[-1][1] = r
+        else:
+            out.append([r, r])
+    return ",".join(f"{a}-{b}" if a != b else f"{a}" for a, b in out)
+
+
+def expand_ranges(text):
+    rows = []
+    for part in filter(None, (text or "").split(",")):
+        a, _, b = part.partition("-")
+        rows += range(int(a), int(b or a) + 1)
+    return rows
+
+
+def _delete_rows(wb, ws, removed):
+    """
+    Deletes rows of `ws` and renumbers every reference to that sheet in every formula of the workbook (openpyxl's
+    own delete_rows moves cells but leaves formulas pointing at the old rows). A range whose first or last row is
+    deleted shrinks to the nearest row kept.
+    """
+    removed = sorted(set(removed))
+    gone = set(removed)
+
+    def renumber(r, end=False):
+        while r in gone:
+            r += -1 if end else 1
+        return r - bisect.bisect_left(removed, r)
+
+    def fix_ref(text, sheet_title):
+        m = _REF.fullmatch(text)
+        if not m:
+            return text
+        sheet = (m.group("sheet") or "")[:-1].strip("'") or sheet_title
+        if sheet != ws.title:
+            return text
+        prefix, r1 = m.group("sheet") or "", renumber(int(m.group("r1")))
+        if not m.group("r2"):
+            return f"{prefix}{m.group('c1')}{m.group('d1')}{r1}"
+        r2 = max(r1, renumber(int(m.group("r2")), end=True))
+        return f"{prefix}{m.group('c1')}{m.group('d1')}{r1}:{m.group('c2')}{m.group('d2')}{r2}"
+
+    for sheet in wb.worksheets:
+        for row in sheet.iter_rows():
+            for cell in row:
+                v = cell.value
+                if not (isinstance(v, str) and v.startswith("=")):
+                    continue
+                tok = Tokenizer(v)
+                changed = False
+                for t in tok.items:
+                    if t.type == "OPERAND" and t.subtype == "RANGE":
+                        fixed = fix_ref(t.value, sheet.title)
+                        if fixed != t.value:
+                            t.value, changed = fixed, True
+                if changed:
+                    cell.value = tok.render()
+
+    dims = {r: d for r, d in ws.row_dimensions.items()}
+    # delete from the bottom up, in contiguous blocks
+    blocks = []
+    for r in reversed(removed):
+        if blocks and blocks[-1][0] == r + 1:
+            blocks[-1][0] = r
+        else:
+            blocks.append([r, r])
+    for first, last in blocks:
+        ws.delete_rows(first, last - first + 1)
+    ws.row_dimensions.clear()
+    for r, d in dims.items():
+        if r in gone:
+            continue
+        d.index = renumber(r)
+        ws.row_dimensions[d.index] = d
+
+
+def _remove_empty_rows(wb, ws):
+    """Rows of Sch. with no heading, label or figure (unused spare rows, spacing rows) are deleted; which template
+    rows were deleted is kept in a workbook property so 'add a new FY' can read the workbook back."""
+    removed = [r for r in range(1, ws.max_row + 1) if all(ws.cell(r, c).value is None for c in range(1, 8))]
+    if not removed:
+        return
+    _delete_rows(wb, ws, removed)
+    wb.custom_doc_props.append(StringProperty(name=REMOVED_ROWS_PROPERTY, value=_compact_ranges(removed)))
+
+
 def _relabel_years(wb, columns):
     """Year headings for a moved window: IS / Sch. 'FY22' -> 'FY19', BS '31 Mar 22' -> '31 Mar 19' (CF and Ratios
     take theirs from these)."""
@@ -434,6 +547,8 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
     _cash_flow_share_capital(wb, ws, fy_columns, report)
     _clear_unused_years(wb, fy_columns, report.columns)
     _show_everything(wb)
+    _clean_borders(ws)
+    _remove_empty_rows(wb, ws)              # last: every row number above refers to the template's layout
     wb.calculation.fullCalcOnLoad = True   # openpyxl drops cached results; Excel recomputes on open
     wb.save(output_path)
     return report

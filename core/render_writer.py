@@ -557,7 +557,9 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
     for fy, value in (reported_pat or {}).items():
         col = report.columns.get(fy)
         if col and value is not None and fy in fy_columns:
-            wb["IS"][f"{col}24"].value = value / 1_000_000   # IS is in INR million
+            # the full figure over the workbook's unit cell, so it follows a change of unit like every other line
+            number = f"{value:.2f}".rstrip("0").rstrip(".")
+            wb["IS"][f"{col}24"].value = f"={number if number not in ('', '-', '-0') else '0'}/curr"
 
     if equity_shares:
         ws[f"B{ALL_SCHEDULES['Share Capital']['first_item_row']}"].value = f"{equity_shares} equity shares of Rs. 10 each"

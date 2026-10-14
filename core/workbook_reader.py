@@ -128,8 +128,11 @@ def read_workbook(path):
 
     for fy, col in columns.items():
         v = wb["IS"][f"{col}24"].value
-        if isinstance(v, (int, float)):
-            data.reported_pat[fy] = float(v) * 1_000_000
+        m = re.fullmatch(r"=\s*\(?\s*(-?[\d.]+)\s*\)?\s*/\s*curr\s*", v) if isinstance(v, str) else None
+        if m:
+            data.reported_pat[fy] = float(m.group(1))          # "=245000000/curr": the full figure
+        elif isinstance(v, (int, float)):
+            data.reported_pat[fy] = float(v) * 1_000_000         # older workbooks: a value in INR million
 
     data.fy_columns = [fy for fy in columns
                        if any(i.fy_values.get(fy) for i in data.items if i.schedule_override != "Reserves and Surplus")]

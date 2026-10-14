@@ -9,7 +9,7 @@ exactly, including its quirks:
   * the BS is presented "net": Net worth + Borrowings must equal Fixed assets
     + Deferred tax (net) + Investments + Cash + (Current assets - Current
     liabilities);
-  * Reserves = Securities premium + Surplus closing, where Surplus closing =
+  * Reserves = Securities premium + Other reserves + Surplus closing, where Surplus closing =
     Opening + other movements + Profit for the year (the PAT from the IS);
     the Opening balance is an input only for the first year, later years open
     with the previous year's closing.
@@ -23,7 +23,7 @@ from core.routing import CHANGE_IN_INVENTORIES, schedule_for
 SCHEDULE_NAMES = (
     "Revenue", "Other Income", "COGS-Purchase", "COGS-Manufacturing", "Employee Benefit Expenses",
     "Administrative Expenses", "Selling & Distribution Expenses", "Depreciation", "Finance Costs", "Tax Expense",
-    "Share Capital", "Reserves and Surplus", "Securities Premium", "Reserves Adjustments",
+    "Share Capital", "Reserves and Surplus", "Securities Premium", "Other Reserves", "Reserves Adjustments",
     "Borrowings - Long Term", "Borrowings - Short Term", "Trade Payables", "Current Liability - Other",
     "Long-term Provisions", "Short-term Provisions", "Fixed Assets", "Deferred Tax Assets",
     "Deferred Tax Liabilities", "Investments", "Cash & Bank", "Trade Receivables", "Inventory",
@@ -76,7 +76,7 @@ def compute_statements(line_items, fy_columns):
 
         opening = t("Reserves and Surplus", fy) if previous_closing is None else previous_closing
         surplus_closing = opening + t("Reserves Adjustments", fy) + pat
-        reserves = t("Securities Premium", fy) + surplus_closing
+        reserves = t("Securities Premium", fy) + t("Other Reserves", fy) + surplus_closing
         previous_closing = surplus_closing
         share_capital = t("Share Capital", fy)
         net_worth = share_capital + reserves

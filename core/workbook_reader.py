@@ -23,7 +23,7 @@ PNL_SCHEDULES = {
     "Administrative Expenses", "Selling & Distribution Expenses", "Depreciation", "Finance Costs", "Tax Expense",
 }
 SINGLE_CELL_SCHEDULES = {
-    "Share Capital", "Securities Premium", "Reserves Adjustments", "Deferred Tax Assets", "Deferred Tax Liabilities",
+    "Share Capital", "Securities Premium", "Other Reserves", "Reserves Adjustments", "Deferred Tax Assets", "Deferred Tax Liabilities",
     "Reserves and Surplus",
 }
 _YELLOW = {"00FFFF00", "FFFFFF00"}
@@ -99,12 +99,16 @@ def read_workbook(path):
             if not _has_value(values):
                 continue
             label = str(ws.cell(r, 2).value or key)
+            if key == "Other Reserves" and re.search(r"securities\s*premium", label, re.I):
+                key_here = "Securities Premium"     # a workbook made before the Other reserves row existed
+            else:
+                key_here = key
             fill = ws.cell(r, 2).fill
             is_new = bool(fill and fill.fill_type == "solid" and str(fill.start_color.rgb) in _YELLOW)
             comment = ws.cell(r, 2).comment
             data.items.append(LineItem(
                 statement=statement, line_item=label, statement_tag="", fy_values=values,
-                source="workbook", is_new=is_new, schedule_override=key,
+                source="workbook", is_new=is_new, schedule_override=key_here,
                 pdf_heading=(comment.text if comment else ""), confidence="Matched" if not is_new else "Uncertain (new item)",
             ))
 
@@ -114,7 +118,9 @@ def read_workbook(path):
               for fy in columns}
     if _has_value(change):
         data.items.append(LineItem(statement="P&L", line_item="Change in inventories", statement_tag="Change in Inventories",
-                                   fy_values=change, source="workbook", schedule_override=CHANGE_IN_INVENTORIES))
+                                   fy_values=change, source="workbook", schedule_override=CHANGE_IN_INVENTORIES,
+                                   stock_levels={fy: (op[fy] or 0.0, cl[fy] or 0.0) for fy in columns
+                                                 if op[fy] is not None or cl[fy] is not None}))
 
     for fy, col in columns.items():
         v = wb["IS"][f"{col}24"].value

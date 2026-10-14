@@ -5,6 +5,7 @@
   "order": [
     "Share Capital",
     "Securities Premium",
+    "Other Reserves",
     "Reserves and Surplus",
     "Reserves Adjustments",
     "Long-term Provisions",
@@ -47,7 +48,7 @@
       "spare_rows": 0
     },
     "Reserves and Surplus": {
-      "title_row": 13,
+      "title_row": 12,
       "first_item_row": 17,
       "last_item_row": 17,
       "total_row": 22,
@@ -56,16 +57,16 @@
       "spare_rows": 0
     },
     "Securities Premium": {
-      "title_row": 13,
-      "first_item_row": 15,
-      "last_item_row": 15,
+      "title_row": 12,
+      "first_item_row": 14,
+      "last_item_row": 14,
       "total_row": 22,
       "pattern": "single_cell",
       "insertable": false,
       "spare_rows": 0
     },
     "Reserves Adjustments": {
-      "title_row": 13,
+      "title_row": 12,
       "first_item_row": 19,
       "last_item_row": 19,
       "total_row": 22,
@@ -324,6 +325,15 @@
       "pattern": "total_first",
       "insertable": true,
       "spare_rows": 20
+    },
+    "Other Reserves": {
+      "title_row": 12,
+      "first_item_row": 15,
+      "last_item_row": 15,
+      "total_row": 22,
+      "pattern": "single_cell",
+      "insertable": false,
+      "spare_rows": 0
     }
   }
 }

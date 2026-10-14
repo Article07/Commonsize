@@ -29,6 +29,7 @@ class LineItem:
     schedule_override: str = ""  # user's choice in the review table; beats automatic routing
     flags: list = field(default_factory=list)
     alt_values: dict = field(default_factory=dict)  # figure the note shows when it differs from the face figure (rupees)
+    stock_levels: dict = field(default_factory=dict)  # change in inventories: {fy: (opening stock, closing stock)} (rupees)
 
 
 @dataclass

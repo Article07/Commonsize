@@ -40,7 +40,7 @@ from core.routing import CHANGE_IN_INVENTORIES, schedule_for
 YELLOW = PatternFill(fill_type="solid", start_color="FFFF00", end_color="FFFF00")
 VALUE_COLUMNS = "CDEFG"
 SPECIAL_SINGLE = {            # schedules that are a fixed input cell, values are added into it
-    "Share Capital", "Securities Premium", "Reserves Adjustments",
+    "Share Capital", "Securities Premium", "Other Reserves", "Reserves Adjustments",
     "Deferred Tax Assets", "Deferred Tax Liabilities",
 }
 _MATERIALS_CONSUMED = re.compile(r"materials?\s*consumed|cost\s*of\s*(?:raw\s*)?materials?", re.I)
@@ -248,6 +248,10 @@ def _write_change_in_inventories(ws, items, fy_columns, columns):
         if not col or not values:
             continue
         net = sum(values)                      # template: change = opening - closing
+        levels = [i.stock_levels[fy] for i in items if fy in i.stock_levels]
+        if len(levels) == 1 and abs(levels[0][0] - levels[0][1] - net) < 1.0:
+            ws[f"{col}{opening}"].value, ws[f"{col}{closing}"].value = levels[0]    # the stock the notes give
+            continue
         ws[f"{col}{opening}"].value = max(net, 0.0)
         ws[f"{col}{closing}"].value = max(-net, 0.0)
 
@@ -461,7 +465,7 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
     ws = wb[SHEET_NAME]
     wb["IS"]["B2"].value = company_name
 
-    used_spares, inventory_items, overflow, extras = set(), [], [], {}
+    used_spares, inventory_items, overflow, extras, filled = set(), [], [], {}, {}
     for item in line_items:
         if item.statement not in ("P&L", "BS"):
             continue
@@ -498,6 +502,10 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
         if key in SPECIAL_SINGLE:
             row = sched["first_item_row"]
             _add_values(ws, row, item, fy_columns, report)
+            if "label_row" in item.flags:
+                ws.cell(row, 2).value = item.line_item       # the filing's own wording for a fixed row
+            if item.pdf_heading.startswith("Authorised: ") and key == "Share Capital":
+                ws.cell(ALL_SCHEDULES[key]["title_row"] + 3, 2).value = item.pdf_heading[len("Authorised: "):]
             report.placements.append(Placement(item.line_item, key, row, "special"))
             continue
 
@@ -507,12 +515,24 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
         if not item.match_score and _norm(item.line_item) not in GENERIC_FILLERS:
             wanted.reverse()
         row = _revenue_row(ws, sched, item) if key == "Revenue" else _match_row(ws, sched, wanted, used_spares)
+        if row is not None and "own_row" in item.flags and _norm(filled.get(row, item.line_item)) != _norm(item.line_item):
+            # a different line already sits in that row: keep each line of the filing on its own row
+            spare = _place_in_spare(ws, key, item, fy_columns, report, used_spares)
+            if spare is not None:
+                filled[spare] = item.line_item
+                report.placements.append(Placement(item.line_item, key, spare, "spare", True))
+                continue
         if row is not None:
+            if "own_row" in item.flags and row not in filled and _match_row(ws, {"first_item_row": row, "last_item_row": row},
+                                                                           [item.line_item], set()) is None:
+                ws.cell(row, 2).value = item.line_item     # a row taken by meaning only: the filing's own wording
+            filled.setdefault(row, item.line_item)
             _add_values(ws, row, item, fy_columns, report)
             report.placements.append(Placement(item.line_item, key, row, "matched"))
             continue
         row = _place_in_spare(ws, key, item, fy_columns, report, used_spares)
         if row is not None:
+            filled[row] = item.line_item
             report.placements.append(Placement(item.line_item, key, row, "spare", True))
             continue
         total_cell = ws[f"C{sched['total_row']}"].value

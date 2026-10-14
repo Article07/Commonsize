@@ -30,6 +30,7 @@ _BS_TAG_TO_SCHEDULE = {
     "Paid-up Share Capital": "Share Capital",
     "Opening Reserves": "Reserves and Surplus",
     "Securities Premium": "Securities Premium",
+    "Other Reserves": "Other Reserves",
     "Reserves Adjustments": "Reserves Adjustments",
     "Deferred Tax Assets": "Deferred Tax Assets",
     "Deferred Tax Liabilities": "Deferred Tax Liabilities",

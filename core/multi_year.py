@@ -140,6 +140,7 @@ def combine(sources):
                 target = deepcopy(item)
                 target.fy_values = {fy: None for fy in all_fys}
                 target.alt_values = {}
+                target.stock_levels = {}
                 merged[key] = target
                 order.append(key)
             else:
@@ -151,6 +152,8 @@ def combine(sources):
             for fy in years:
                 if fy in item.alt_values:
                     target.alt_values[fy] = item.alt_values[fy]
+                if fy in item.stock_levels:
+                    target.stock_levels[fy] = item.stock_levels[fy]
     items = [merged[k] for k in order]
     _bridge_restatements(sources, items, all_fys, owner, owner_by, warnings)
     return Combined(items, all_fys, owner, warnings)

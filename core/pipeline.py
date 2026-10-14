@@ -26,7 +26,7 @@ def read_pdf(pdf_bytes, progress=None):
     """-> (ExtractionResult, MappingResult)"""
     pages = read_pages(pdf_bytes, progress=progress)
     if xbrl_reader.is_xbrl(pages):        # the MCA AOC-4 XBRL rendering: read by its taxonomy sections
-        return xbrl_reader.read(pages)
+        return xbrl_reader.read(pages, pdf_bytes)
     extraction = extract_from_pages(pages)
     return extraction, map_extraction(extraction)
 

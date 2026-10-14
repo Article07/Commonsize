@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from core.pdf_mapper import MappingResult, _PNL_ITEM_BELOW, _SAME_IS_LINE, _SUMMARY_LINE, _make_item, _side_rules
 from core.pdf_reader import ExtractedRow, ExtractionResult
-from core.routing import schedule_for
+from core.routing import CHANGE_IN_INVENTORIES, schedule_for
 
 _SECTION = re.compile(r"^\[(\d{6})\]\s*(.+)$")
 _DATE = re.compile(r"^(\d{2})/(\d{2})/(\d{4})$")
@@ -33,6 +33,7 @@ TOL = 0.011
 # section codes: Ind AS taxonomy, then the older Indian GAAP (Schedule III) taxonomy
 _BS_CODES, _PNL_CODES = ("110000", "100100"), ("210000", "100200")
 _NOTE_CODES, _EQUITY_CODES = ("500100", "300500"), ("400200", "200200")
+_BS_NOTE_CODES, _SHARE_CODES = ("401100", "200600"), ("400100", "200100")
 _PNL_MUST = r"^revenue from|^total income|^total revenue"
 # in the XBRL statements these are the purchases (Sch. Cost of goods sold)
 _PURCHASES = re.compile(r"^\W*(?:cost of (?:raw )?materials? consumed|purchases? of stock.in.trade)", re.I)
@@ -192,6 +193,8 @@ def _sections(lines):
             continue
         if line.lower().endswith("[abstract]"):
             heading = re.sub(r"\s*\[abstract\]$", "", line, flags=re.I)
+            if pending is not None and (not heading or heading[:1].islower()):
+                heading = f"{pending} {heading}".strip()     # a heading wrapped before "[Abstract]"
             table.rows.append(Row(heading, [], heading, page))       # a heading marker (no values)
             table.open.append(heading)
             pending = None
@@ -278,7 +281,12 @@ _PNL_GROUPS = [
 
 
 def _note_groups(table):
-    """{face pattern: [Row]} -- the item rows of each [500100] group."""
+    """
+    {face pattern: [Row]} -- the item rows of each [500100] group. Headings nest ("Managerial remuneration" >
+    "Remuneration to directors"); a sub-heading's total counts as an item only when nothing under it was itemised
+    ("Total remuneration to manager" alone), never on top of its own items ("Total contract cost" after "Site
+    labour" and "Other claims"). A line repeated with the same figures (a total printed without "Total") counts once.
+    """
     out = {}
     if table is None:
         return out
@@ -287,25 +295,51 @@ def _note_groups(table):
         start = next((k for k, r in enumerate(rows) if not r.values and re.search(head, r.label, re.I)), None)
         if start is None:
             continue
-        items, since = [], []
+        items, stack, previous = [], [[rows[start].label, False]], None      # stack: [heading, itemised under it]
         for r in rows[start + 1:]:
             if r.values and re.search(total, r.label, re.I):
                 break
             if not r.values:
-                since = []
+                if r.label:
+                    stack.append([r.label, False])
                 continue
+            if previous is not None and r.label.lower() == previous.label.lower() and r.values == previous.values:
+                continue
+            previous = r
             if r.is_total:
-                if not since:
-                    items.append(r)          # a sub-heading with only its total
-                continue
-            items.append(r)
-            since.append(r)
+                k = next((k for k in range(len(stack) - 1, -1, -1) if _closes(r.label, stack[k][0])), None)
+                itemised = stack[k][1] if k is not None else any(h[1] for h in stack)
+                if k is not None:
+                    del stack[k:]
+                if itemised:
+                    continue
+                items.append(r)                     # a sub-heading with only its total
+            else:
+                items.append(r)
+            for h in stack:
+                h[1] = True
         out[face] = items
     return out
 
 
-def read(pages):
-    """-> (ExtractionResult, MappingResult) for an XBRL rendering."""
+def _section_pages(pages, codes):
+    """1-based page numbers on which any of the given sections is open."""
+    out, current = set(), None
+    for p in pages:
+        if current in codes:
+            out.add(p.page)
+        for line in p.lines:
+            m = re.match(r"^\[(\d{6})\]", line.strip())
+            if m:
+                current = m.group(1)
+                if current in codes:
+                    out.add(p.page)
+    return out
+
+
+def read(pages, pdf_bytes=None):
+    """-> (ExtractionResult, MappingResult) for an XBRL rendering. With the PDF itself, the note tables are also
+    read by position (Balance Sheet breakups, components of reserves)."""
     lines = _content_lines(pages)
     sections = _sections(lines)
     bs = _main_table(sections, _BS_CODES, r"^total assets")
@@ -338,6 +372,15 @@ def read(pages):
                                           "changes in equity / reserves)."],
                                   warnings=[], whole_units=False)
     extraction.xbrl = sections
+    extraction.xbrl_tables = []
+    if pdf_bytes:
+        from core.xbrl_tables import read_tables
+        codes = set(_BS_NOTE_CODES + _EQUITY_CODES)
+        try:
+            extraction.xbrl_tables = read_tables(pdf_bytes, _section_pages(pages, codes), codes)
+        except Exception as exc:          # the statements are still read; only the extra detail is lost
+            extraction.warnings.append(f"The note tables could not be read by position ({exc}); Balance Sheet lines "
+                                       "are not itemised.")
     return extraction, map_xbrl(extraction, mult)
 
 
@@ -374,6 +417,183 @@ def _soce(sections, fy_columns, pat):
     return opening, moves
 
 
+def _side(label):
+    if re.search(r"non.?current|long.?term", label, re.I):
+        return "non-current"
+    if re.search(r"\bcurrent\b|short.?term", label, re.I):
+        return "current"
+    return None
+
+
+def _key(label):
+    """'Other current financial liabilities, others' / 'Total trade receivables' -> the line it breaks up."""
+    t = re.sub(r"\[.*?\]", " ", label.lower())
+    t = re.sub(r"non.?current|long.?term|short.?term|\bcurrent\b", " ", t)
+    t = re.sub(r"\b(?:total|gross|others?|notes?|disclosure of|breakup of|details of|subclassification of|"
+               r"classification of)\b", " ", t)
+    return " ".join(re.findall(r"[a-z]+", t))
+
+
+def _clean_name(text):
+    """A cell's text without footnote markers and 'Textual information (12) [See below]' placeholders."""
+    t = re.sub(r"textual information\s*(?:\(\d+\))?\s*(?:\[see below\]|below\])?", " ", text, flags=re.I)
+    t = re.sub(r"\((?:[A-Z]{1,2})\)|\[see below\]|below\]", " ", t, flags=re.I)
+    t = re.sub(r"\s+", " ", t).strip(" ,;")
+    return t if re.search(r"[A-Za-z]{3}", t) else ""
+
+
+def _member_names(table):
+    """Display name of each member: the filing's description of it ("Description ..." / "Nature of ..." rows,
+    read down its first column), else the member heading."""
+    out = []
+    # cell text names a member only where the filing describes its members (a "Description ..." / "Nature of ..."
+    # row); other text cells are explanatory paragraphs
+    rows = table.rows
+    near = set()                      # the describing row, the figures row just above it, its wrapped lines below
+    for k, r in enumerate(rows):
+        if re.match(r"description|nature of", r.label, re.I):
+            near.update({k - 1, k} if k and rows[k - 1].values else {k})
+            j = k + 1
+            while j < len(rows) and not rows[j].values:
+                near.add(j)
+                j += 1
+    for m in table.members:
+        col = m.columns[0]
+        texts = [_clean_name(r.texts[col]) for k, r in enumerate(rows) if k in near and col in r.texts
+                 and not re.match(r"mode of valuation|type of share|country of", r.label, re.I)]
+        texts = [t for t in texts if t]
+        name = " ".join(texts) if texts else _clean_name(m.name)
+        name = re.sub(r"\s+", " ", name.replace("[Member]", "")).strip(" ,")
+        if not texts:
+            # an outer current / non-current axis stacked above the member's own heading
+            name = re.sub(r"^(?:non.?current|current)\s+(?=\S)", "", name, flags=re.I)
+        out.append(name)
+    return out
+
+
+def _note_candidates(tables, fy_columns):
+    """
+    [(key, side, {name: {fy: value}})] -- every way the note tables break up a Balance Sheet line. Only tables
+    with members (an "[Axis]"), not the explanatory text blocks; a breakup into a single part only where the
+    filing names that part itself (a "Description ..." / "Nature of ..." row).
+    """
+    sides = {"current": "current", "noncurrent": "non-current"}
+    sets = {}                         # (key, side, row) -> [parts, the parts are named by the filing]
+    for t in tables:
+        if t.code not in _BS_NOTE_CODES or not t.axis.strip() or not t.members:
+            continue
+        names = _member_names(t)
+        described = any(re.match(r"description|nature of", r.label, re.I) for r in t.rows)
+        member_sides = [sides.get(re.sub(r"[^a-z]", "", m.name.lower())) for m in t.members]
+        if all(member_sides):
+            # the members are the current / non-current split: the rows are the items (provisions)
+            for m, side in zip(t.members, member_sides):
+                entry = sets.setdefault((_key(t.title), side, "rows"), [{}, True])
+                for r in t.rows:
+                    if r.values and not r.is_total:
+                        for fy, v in t.values(r, m).items():
+                            entry[0].setdefault(r.label, {})[fy] = v
+            continue
+        seen = set()
+        for r in t.rows:
+            if not r.values or r.label.lower() in seen or re.match(r"description|nature of", r.label, re.I):
+                continue
+            seen.add(r.label.lower())
+            entry = sets.setdefault((_key(r.label), _side(r.label), re.sub(r"[^a-z]", "", r.label.lower())), [{}, described])
+            for m, name in zip(t.members, names):
+                if name:
+                    for fy, v in t.values(r, m).items():
+                        entry[0].setdefault(name, {})[fy] = v
+    out = []
+    for (key, side, _), (parts, described) in sets.items():
+        parts = {n: {fy: v for fy, v in vals.items() if fy in fy_columns} for n, vals in parts.items()}
+        parts = {n: v for n, v in parts.items() if any(v.values())}
+        # a member that is the sum of the others is their total ("Company inventories", the default member)
+        for name in list(parts):
+            others = [v for n, v in parts.items() if n != name]
+            if others and all(abs(parts[name].get(fy, 0.0) - sum(o.get(fy, 0.0) for o in others)) <= TOL
+                              for fy in fy_columns):
+                del parts[name]
+                break
+        if len(parts) > 1 or (parts and described):
+            out.append((key, side, parts))
+    return out
+
+
+def _note_parts(candidates, label, values, fy_columns):
+    """{name: {fy: value}} breaking up a Balance Sheet line, from the first candidate that adds up to it."""
+    key, side = _key(label), _side(label)
+    if not key or not any(values.get(fy) for fy in fy_columns):
+        return None
+    for k, s, parts in candidates:
+        if k != key or (s is not None and side is not None and s != side):
+            continue
+        if all(abs(sum(p.get(fy, 0.0) for p in parts.values()) - (values.get(fy) or 0.0)) <= TOL + 0.005 * len(parts)
+               for fy in fy_columns):
+            if len(parts) == 1 and _key(next(iter(parts))) == key:
+                return None               # only the line itself again
+            return parts
+    return None
+
+
+def _equity_components(tables):
+    """(securities premium {fy: balance} | None, other reserves (name, {fy: balance}) | None): each component's
+    balance at the end of each year, from the changes in equity / reserves tables."""
+    balances = {}
+    for t in tables:
+        if t.code not in _EQUITY_CODES:
+            continue
+        end = next((r for r in t.rows if r.values and re.search(r"(?:other equity|reserves|equity) at end of period",
+                                                                   r.label, re.I)), None)
+        if end is None:
+            continue
+        for m in t.members:
+            for fy, v in t.values(end, m).items():
+                balances.setdefault(re.sub(r"\s+", " ", m.name).strip(), {})[fy] = v
+    premium = next((v for n, v in balances.items() if re.search(r"securities premium", n, re.I)), None)
+    others = {n: v for n, v in balances.items()
+              if not re.search(r"securities premium|^equity|attributable|^reserves$|retained|surplus|comprehensive|"
+                               r"share capital|controlling|^total|other equity|^$|profit and loss", n, re.I)}
+    other = None
+    if others:
+        years = {fy for v in others.values() for fy in v}
+        other = (", ".join(others), {fy: sum(v.get(fy, 0.0) for v in others.values()) for fy in years})
+    return premium, other
+
+
+def _other_comprehensive_income(sections):
+    """{fy: other comprehensive income} from the statement of changes in equity (its first, total, column)."""
+    table = _main_table(sections, _EQUITY_CODES, r"other equity at end of period|reserves at end of period")
+    if table is None:
+        return {}
+    row = next((r for r in table.rows if r.values and re.search(r"^changes in comprehensive income components|"
+                                                                  r"^other comprehensive income", r.label, re.I)), None)
+    return table.values_of(row, kinds=("D",)) if row is not None else {}
+
+
+def _share_capital_labels(lines):
+    """('9,46,91,773 equity shares of Rs. 5 each', '15,70,00,000 equity shares of Rs. 5 each') from the share
+    capital note, else (None, None)."""
+    text, on = [], False
+    for _, line in lines:
+        m = _SECTION.match(line)
+        if m:
+            on = m.group(1) in _SHARE_CODES
+            continue
+        if on:
+            text.append(line)
+    joined = " ".join(text)
+    issued = re.search(r"Number of shares issued\s*\[shares\]\s*([\d,]+)", joined)
+    authorised = re.search(r"Number of shares authorised\s*\[shares\]\s*([\d,]+)", joined)
+    par = re.search(r"(?:Par|Face|Nominal) value per share\s*\[INR/shares\]\s*([\d.]+)", joined)
+    if not issued or not par:
+        return None, None, None
+    rupees = f"{float(par.group(1)):g}"
+    issued_text = f"{issued.group(1)} equity shares of Rs. {rupees} each"
+    authorised_text = f"{authorised.group(1)} equity shares of Rs. {rupees} each" if authorised else None
+    return issued_text, authorised_text, float(issued.group(1).replace(",", "")) * float(par.group(1))
+
+
 def map_xbrl(extraction, multiplier=None):
     mult = extraction.unit_multiplier if multiplier is None else multiplier
     fy = list(extraction.fy_columns)
@@ -390,7 +610,12 @@ def map_xbrl(extraction, multiplier=None):
 
     def item(label, values, statement, heading, page, flags=(), source="pdf-face"):
         return _make_item(label, {k: v for k, v in values.items() if k in fy}, statement, heading, source, page,
-                          list(flags), fy, mult)
+                          list(flags) + ["own_row"], fy, mult)
+
+    tables = getattr(extraction, "xbrl_tables", None) or []
+    note_sets = _note_candidates(tables, fy)
+    issued_text, authorised_text, issued_value = _share_capital_labels(_content_lines(extraction.pages))
+    inventory_parts = None
 
     def add_with_breakdown(table, r, statement, heading, base):
         parts = _breakdown(table, r, fy)
@@ -422,6 +647,28 @@ def map_xbrl(extraction, multiplier=None):
         if all(not values.get(y) for y in fy):
             continue
         base = _side_rules(item(r.label, values, "BS", r.heading, r.page), "BS", r.label, assets_side)
+        latest = max(fy, key=lambda f: int(f[2:]))
+        if re.search(r"share capital", r.label, re.I) and issued_text and base.fy_values.get(latest) \
+                and abs(issued_value - base.fy_values[latest]) <= 0.01 * base.fy_values[latest]:
+            # the wording only when shares x face value is the share capital shown (one class of shares)
+            base.line_item = issued_text
+            base.flags.append("label_row")
+            base.pdf_heading = f"Authorised: {authorised_text}" if authorised_text else base.pdf_heading
+        parts = None if re.search(r"share capital", r.label, re.I) else _note_parts(note_sets, r.label, values, fy)
+        if parts:
+            face_key = schedule_for(base)
+            for name, vals in parts.items():
+                it = item(name, {y: vals.get(y, 0.0) for y in fy if values.get(y) is not None}, "BS", r.label,
+                          r.page, ["from_note"], "pdf-note")
+                it.line_item = name                      # as the note names it ("Non-current lease liabilities")
+                if face_key:
+                    it.schedule_override = face_key      # a part stays under the line it breaks up
+                    it.flags = [f for f in it.flags if f != "unplaced"]
+                result.items.append(it)
+            if re.match(r"^inventor", r.label, re.I):
+                inventory_parts = parts
+            result.log.append(f"{r.label}: itemised from the notes on liabilities and assets ({len(parts)} lines)")
+            continue
         add_with_breakdown(bs, r, "BS", r.heading, base)
 
     # ---- Other equity: opening balance and movements from the statement of changes in equity
@@ -461,21 +708,52 @@ def map_xbrl(extraction, multiplier=None):
             result.log.append(f"WARNING: Other equity for {y} rolls forward to {expected:,.2f} but the balance sheet "
                               f"shows {oe[y]:,.2f}.")
         running = oe[y] if y in restated else expected
+    premium, other = _equity_components(tables)
+    if (premium and any(premium.get(y) is None for y in years)) or (other and any(other[1].get(y) is None for y in years)):
+        premium = other = None            # a balance missing for a year: keep Other equity in one piece
+    before = f"FY{int(earliest[2:]) - 1:02d}"
+
+    def components(y):
+        """securities premium + other reserves at the end of year y (the part of Other equity that is not surplus)"""
+        if y not in years and not ((premium and y in premium) or (other and y in other[1])):
+            y = earliest                  # no balance printed for the day before: taken as unchanged
+        return (premium or {}).get(y, 0.0) + (other[1] if other else {}).get(y, 0.0)
+
+    if premium or other:
+        for y, prev in zip(years, [before] + years[:-1]):
+            change = components(y) - components(prev)
+            if abs(change) > TOL:
+                moves[y] = (moves.get(y) or 0.0) - change    # the surplus moves by the rest
+        if opening is not None:
+            opening -= components(before)
+        for label, tag, values in (("Securities premium", "Securities Premium", premium),
+                                   (other[0] if other else "", "Other Reserves", other[1] if other else None)):
+            if values and any(values.get(y) for y in years):
+                it = item(label, {y: values[y] for y in years}, "BS", "Other equity", None, ["label_row"], "pdf-note")
+                it.statement_tag, it.category, it.is_new, it.confidence = tag, "", False, "Matched"
+                it.flags = [f for f in it.flags if f != "unplaced"]
+                result.items.append(it)
+        result.log.append("Other equity: securities premium and other reserves shown as balances of their own, from the "
+                          "statement of changes in equity; the surplus rolls forward with the profit.")
     if opening is not None:
         # later years open on last year's balance sheet figure (the roll-forward uses the previous closing, so
         # these only matter when a year is taken on its own: a later year of a multi-file combination)
         openings = {earliest: opening}
         for prev, y in zip(years, years[1:]):
             if oe.get(prev) is not None:
-                openings[y] = oe[prev]
+                openings[y] = oe[prev] - components(prev)
         it = item("Other equity - opening balance", openings, "BS", "Other equity", None, source="pdf-note")
         it.statement_tag, it.category, it.is_new, it.confidence = "Opening Reserves", "", False, "Matched"
         it.flags = [f for f in it.flags if f != "unplaced"]
         result.items.append(it)
-    for label, values in (("Other changes in equity (statement of changes in equity)", moves),
+    oci = _other_comprehensive_income(sections)
+    moves_label = "Other changes in equity (statement of changes in equity)"
+    if oci and moves and all(abs((moves.get(y) or 0.0) - (oci.get(y) or 0.0)) <= TOL for y in years):
+        moves_label = "Other comprehensive income (net of tax)"
+    for label, values in ((moves_label, moves),
                           ("Opening reserves restated (differs from last year's closing)", restated)):
         if any(abs(v) > 1e-9 for v in values.values()):
-            it = item(label, values, "BS", "Other equity", None, source="pdf-note")
+            it = item(label, values, "BS", "Other equity", None, ["label_row"] if values is moves else [], "pdf-note")
             it.statement_tag, it.category, it.is_new, it.confidence = "Reserves Adjustments", "", False, "Matched"
             it.flags = [f for f in it.flags if f != "unplaced"]
             result.items.append(it)
@@ -558,6 +836,17 @@ def map_xbrl(extraction, multiplier=None):
                 continue
             result.log.append(f"{r.label}: the [500100] breakup does not add up to the statement, so the statement figure is used")
         add_with_breakdown(pnl, r, "P&L", r.heading, base)
+    if inventory_parts:
+        goods = [v for n, v in inventory_parts.items() if re.search(r"finished|work.in.progress|stock.in.trade|traded", n, re.I)]
+        change = next((it for it in result.items if schedule_for(it) == CHANGE_IN_INVENTORIES), None)
+        if goods and change is not None:
+            for y in fy:
+                if change.fy_values.get(y) is not None and all(g.get(y) is not None for g in goods):
+                    closing = sum(g[y] for g in goods) * mult
+                    change.stock_levels[y] = (closing + change.fy_values[y], closing)
+            if change.stock_levels:
+                result.log.append("Change in inventories: opening and closing stock (finished goods, work-in-progress, "
+                                  "stock-in-trade) from the inventories note.")
     # a "Cost of materials consumed" filed inside another line's breakup (Other expenses) is purchases too
     for it in result.items:
         if it.statement == "P&L" and _PURCHASES.match(it.line_item) and it.schedule_override != "COGS-Purchase":

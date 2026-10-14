@@ -46,7 +46,7 @@ import win32com.client as win32
 from base_layout import BASE_ORDER, BASE_SCHEDULES, NEW_ROWS, SPARE_ROWS
 
 SHEET_NAME = "Sch."
-REFERENCE_DIR = APP_DIR.parent / "Reference file"
+REFERENCE_DIR = APP_DIR.parent.parent / "Reference file"   # Commonsize/Folder/commonsize_app
 TEMPLATE_PATH = REFERENCE_DIR / "Common size format_Mfg-Trading firm.xlsx"
 LAYOUT_PATH = APP_DIR / "config" / "schedule_layout.json"
 XL_SHIFT_DOWN = -4121

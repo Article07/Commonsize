@@ -18,7 +18,7 @@ import openpyxl
 
 from config.schedule_map import ALL_SCHEDULE_ORDER, ALL_SCHEDULES, SHEET_NAME, spare_row_numbers
 
-TEMPLATE = APP_DIR.parent / "Reference file" / "Common size format_Mfg-Trading firm.xlsx"
+TEMPLATE = APP_DIR.parent.parent / "Reference file" / "Common size format_Mfg-Trading firm.xlsx"   # Commonsize/Folder/commonsize_app
 
 
 def main():

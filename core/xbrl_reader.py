@@ -385,10 +385,15 @@ def read(pages, pdf_bytes=None):
 
 
 def _soce(sections, fy_columns, pat):
-    """(opening Other equity of the earliest year | None, {fy: movements other than profit})"""
+    """
+    (opening Other equity of the earliest year | None, {fy: movements other than profit} from the closing
+    balances, {fy: the same} from the "Total changes" line). The two differ when the filing's total column
+    misstates a closing balance or leaves a reserve out of its changes line; the caller keeps the one that
+    rolls forward to the balance sheet.
+    """
     table = _main_table(sections, _EQUITY_CODES, r"other equity at end of period|reserves at end of period")
     if table is None:
-        return None, {}
+        return None, {}, {}
     end = next((r for r in table.rows if r.values and re.search(r"(?:other equity|reserves) at end of period", r.label, re.I)), None)
     change = next((r for r in table.rows if r.values and re.search(r"total increase \(decrease\) in equity|total changes in reserves",
                                                                     r.label, re.I)), None)
@@ -401,12 +406,14 @@ def _soce(sections, fy_columns, pat):
         closing, changed = table.values_of(end).get(earliest), table.values_of(change, kinds=("D",)).get(earliest)
         if closing is not None and changed is not None:
             opening = closing - changed
-    moves = {}
+    moves, stated = {}, {}
     if change is not None:
         d_change = table.values_of(change, kinds=("D",))
         d_profit = table.values_of(profit, kinds=("D",)) if profit is not None else pat
         ends = table.values_of(end) if end is not None else {}
         for fy in fy_columns:
+            if d_change.get(fy) is not None:
+                stated[fy] = d_change[fy] - (d_profit.get(fy) or 0.0)
             prev = f"FY{int(fy[2:]) - 1:02d}"
             if ends.get(fy) is not None and ends.get(prev) is not None:
                 # closing less opening: also catches a reserve whose balance is printed without a movement line
@@ -414,7 +421,7 @@ def _soce(sections, fy_columns, pat):
                 moves[fy] = ends[fy] - ends[prev] - (d_profit.get(fy) or 0.0)
             elif d_change.get(fy) is not None:
                 moves[fy] = d_change[fy] - (d_profit.get(fy) or 0.0)
-    return opening, moves
+    return opening, moves, stated
 
 
 def _side(label):
@@ -554,11 +561,47 @@ def _equity_components(tables):
     others = {n: v for n, v in balances.items()
               if not re.search(r"securities premium|^equity|attributable|^reserves$|retained|surplus|comprehensive|"
                                r"share capital|controlling|^total|other equity|^$|profit and loss", n, re.I)}
+    # a component that is the total of the others is their heading ("Other reserves" over "General reserve")
+    for name in list(others):
+        rest = [v for n, v in others.items() if n != name]
+        years = set(others[name])
+        if rest and years and all(abs(others[name][y] - sum(v.get(y, 0.0) for v in rest)) <= TOL for y in years):
+            del others[name]
+            break
     other = None
     if others:
         years = {fy for v in others.values() for fy in v}
         other = (", ".join(others), {fy: sum(v.get(fy, 0.0) for v in others.values()) for fy in years})
     return premium, other
+
+
+def _deductions_to_flip(pnl, fy_columns):
+    """
+    Revenue lines printed with the sign their total does not use. The MCA form computes revenue as gross less
+    duties ("Other duties taxes collected", excise duty): a duty entered as a negative figure is added by the
+    filing's own total. -> the deduction rows whose sign has to be turned so the lines add up to the total
+    the filing prints (none when they already add up).
+    """
+    rows = [r for r in pnl.rows if r.values]
+    end = next((k for k, r in enumerate(rows) if re.match(r"^total revenue from operations", r.label, re.I)), None)
+    if end is None:
+        return []
+    lines = [r for r in rows[:end] if not r.is_total]
+    total = pnl.values_of(rows[end])
+    duties = [r for r in lines if re.search(r"dut(?:y|ies)|taxes collected|excise|deductions? (?:from|on) revenue", r.label, re.I)]
+    if not duties:
+        return []
+
+    def adds_up(flip):
+        for y in fy_columns:
+            if total.get(y) is None:
+                continue
+            got = sum((-1 if any(r is f for f in flip) else 1) * (pnl.values_of(r).get(y) or 0.0) for r in lines)
+            if abs(got - total[y]) > TOL + 0.005 * len(lines):
+                return False
+        return True
+
+    return [] if adds_up([]) or not adds_up(duties) else duties
 
 
 def _other_comprehensive_income(sections):
@@ -612,6 +655,7 @@ def map_xbrl(extraction, multiplier=None):
         return _make_item(label, {k: v for k, v in values.items() if k in fy}, statement, heading, source, page,
                           list(flags) + ["own_row"], fy, mult)
 
+    nci = None
     tables = getattr(extraction, "xbrl_tables", None) or []
     note_sets = _note_candidates(tables, fy)
     issued_text, authorised_text, issued_value = _share_capital_labels(_content_lines(extraction.pages))
@@ -641,12 +685,15 @@ def map_xbrl(extraction, multiplier=None):
             elif re.match(r"^equity and liabilities$", r.label, re.I):
                 assets_side = False
             continue
-        if r.is_total or re.search(r"^other equity$|^reserves and surplus$|^non controlling interest$|equity attributable", r.label, re.I):
+        if r.is_total or re.search(r"^other equity$|^reserves and surplus$|equity attributable", r.label, re.I):
             continue
         values = bs.values_of(r)
         if all(not values.get(y) for y in fy):
             continue
         base = _side_rules(item(r.label, values, "BS", r.heading, r.page), "BS", r.label, assets_side)
+        if re.match(r"^non.?controlling interests?$", r.label, re.I):
+            nci = base                    # decided at the end: some filings already carry it in their reserves
+            continue
         latest = max(fy, key=lambda f: int(f[2:]))
         if re.search(r"share capital", r.label, re.I) and issued_text and base.fy_values.get(latest) \
                 and abs(issued_value - base.fy_values[latest]) <= 0.01 * base.fy_values[latest]:
@@ -675,9 +722,20 @@ def map_xbrl(extraction, multiplier=None):
     other_equity = next((r for r in bs.rows if r.values and re.match(r"^other equity$|^reserves and surplus$", r.label, re.I)), None)
     pat_row = next((r for r in pnl.rows if r.values and re.match(r"^total profit \(loss\) for period$", r.label, re.I)), None)
     pat = pnl.values_of(pat_row) if pat_row is not None else {}
-    opening, moves = _soce(sections, fy, pat)
+    opening, moves, stated_moves = _soce(sections, fy, pat)
     earliest = min(fy, key=lambda f: int(f[2:]))
     oe = bs.values_of(other_equity) if other_equity is not None else {}
+    running = opening
+    for y in sorted(fy, key=lambda f: int(f[2:])):
+        if running is None or pat.get(y) is None or oe.get(y) is None:
+            break
+        if (abs(running + pat[y] + (moves.get(y) or 0.0) - oe[y]) > TOL and y in stated_moves
+                and abs(running + pat[y] + stated_moves[y] - oe[y]) <= TOL):
+            # the total column's closing balance is misstated; its "Total changes" line and the balance sheet agree
+            result.log.append(f"Other equity {y}: the reserves note's closing balance does not add up; its 'Total "
+                              f"changes' line ({stated_moves[y] + pat[y]:,.2f}) does and is used.")
+            moves[y] = stated_moves[y]
+        running = oe[y]
     if opening is None and oe.get(earliest) is not None and pat.get(earliest) is not None:
         opening = oe[earliest] - pat[earliest] - (moves.get(earliest) or 0.0)
         result.log.append("WARNING: the statement of changes in equity could not be read; the opening Other equity is "
@@ -759,6 +817,10 @@ def map_xbrl(extraction, multiplier=None):
             result.items.append(it)
 
     # ---- Statement of profit and loss
+    flipped = _deductions_to_flip(pnl, fy)
+    for r in flipped:
+        result.log.append(f"{r.label}: a deduction in the revenue (gross less duties); the filing's own total "
+                          f"takes it with the opposite sign to the one printed, so that sign is used.")
     below_total = False                 # past 'Total expenses': prior period / exceptional items, minority interest
     for r in pnl.rows:
         if not r.values:
@@ -792,6 +854,17 @@ def map_xbrl(extraction, multiplier=None):
                     it.flags = [f for f in it.flags if f != "unplaced"] + ["minority_interest", "below_total_expenses"]
                     result.items.append(it)
             continue
+        if re.match(r"^share of (?:profit|loss|\(?profit).{0,25}associates?", low) and not any(
+                it.line_item.startswith("Share of profit / (loss) of associates") for it in result.items):
+            # Ind AS consolidated: the share of associates / joint ventures comes after tax and is part of the
+            # profit for the period (the Indian GAAP layout is handled with the minority interest above)
+            values = pnl.values_of(r)
+            if any(values.get(y) for y in fy):
+                it = item("Share of profit / (loss) of associates and joint ventures", values, "P&L", r.heading, r.page)
+                it.statement_tag, it.category, it.confidence = "", "Other Income", "Matched"
+                it.flags = [f for f in it.flags if f != "unplaced"] + ["minority_interest", "below_total_expenses"]
+                result.items.append(it)
+            continue
         if re.match(r"^(?:exceptional|extraordinary) items", low):
             # added to the profit before them (a gain positive, a loss negative), like prior period items
             values = pnl.values_of(r)
@@ -804,6 +877,8 @@ def map_xbrl(extraction, multiplier=None):
         if r.is_total or (_SUMMARY_LINE.search(r.label) and not _PNL_ITEM_BELOW.search(r.label))                 or "comprehensive income" in low:
             continue
         values = pnl.values_of(r)
+        if any(r is f for f in flipped):
+            values = {y: -v for y, v in values.items()}
         if all(not values.get(y) for y in fy):
             continue
         base = item(r.label, values, "P&L", r.heading, r.page, ["below_total_expenses"] if below_total else [])
@@ -853,4 +928,18 @@ def map_xbrl(extraction, multiplier=None):
             it.schedule_override = "COGS-Purchase"
             it.flags = [f for f in it.flags if f != "unplaced"]
             result.log.append(f"{it.line_item}: placed under purchases (Cost of goods sold)")
+    if nci is not None and any(nci.fy_values.get(y) for y in fy):
+        # Ind AS consolidated: the non-controlling interest is part of total equity. Where the statement of
+        # changes in equity already rolls it into the reserves column (Krishi Rasayan) the balance sheet tallies
+        # without it; where that column is the owners' alone (Indofil) it is short by exactly this amount.
+        from core.statements import compute_statements
+        years = sorted(fy, key=lambda f: int(f[2:]))
+        gaps = compute_statements(result.items, years)[0]
+        if all(abs(gaps[y]["gap"] + (nci.fy_values.get(y) or 0.0)) <= 0.5 * mult + 1 for y in years):
+            result.items.append(nci)
+            result.log.append("Non-controlling interest: shown under other liabilities (part of total equity, not in the "
+                              "reserves column of the statement of changes in equity).")
+        else:
+            result.log.append("Non-controlling interest: already included in the reserves the statement of changes in "
+                              "equity rolls forward, so not added again.")
     return result

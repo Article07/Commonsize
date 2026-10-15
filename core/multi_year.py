@@ -92,6 +92,21 @@ def same_company(a, b):
     return not a or not b or fuzz.token_set_ratio(a, b) >= 80
 
 
+def default_years(file_count, items, available):
+    """
+    The years the website ticks by default (the regression suite uses the same rule). One file: its two latest
+    years (a third, older column is often only a partial comparative). Several files: every year that has both
+    a Balance Sheet and a P&L, and no year in between left out, as the reserves carry forward year to year.
+    """
+    if file_count == 1:
+        return available[-2:] if len(available) > 2 else list(available)
+    def complete(fy):
+        return {"BS", "P&L"} <= {i.statement for i in items if i.fy_values.get(fy)}
+    full = [fy for fy in available if complete(fy)] or list(available)
+    lo, hi = fy_key(full[0]), fy_key(full[-1])
+    return [fy for fy in available if lo <= fy_key(fy) <= hi]
+
+
 def combine(sources):
     """-> Combined. sources: list[Source], in any order."""
     warnings = []

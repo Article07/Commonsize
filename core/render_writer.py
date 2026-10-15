@@ -228,12 +228,16 @@ def _write_opening_reserves(ws, item, fy_columns, report):
     present = [fy for fy in fy_columns if fy in report.columns]
     if not present:
         return
-    earliest = present[0]
-    value = item.fy_values.get(earliest)
-    if value is not None:
-        cell = ws[f"{report.columns[earliest]}{row}"]
+    # the earliest year, and any year after a skipped one, open on their own balance; the others take the
+    # previous column's closing balance (the template's formula)
+    starts = [fy for k, fy in enumerate(present) if k == 0 or int(fy[2:]) != int(present[k - 1][2:]) + 1]
+    for fy in starts:
+        value = item.fy_values.get(fy)
+        if value is None:
+            continue
+        cell = ws[f"{report.columns[fy]}{row}"]
         cell.value = (cell.value if isinstance(cell.value, (int, float)) else 0.0) + value
-    ignored = [fy for fy in present[1:] if item.fy_values.get(fy) is not None]
+    ignored = [fy for fy in present if fy not in starts and item.fy_values.get(fy) is not None]
     if ignored:
         report.log.append("NOTE: opening reserves for " + ", ".join(ignored) + " were not written; the template carries "
                           "each year's closing reserves forward, only the earliest year's opening balance is an input.")

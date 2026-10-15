@@ -575,6 +575,79 @@ def _equity_components(tables):
     return premium, other
 
 
+def _recover_left_out(result, item, fy_columns, pnl, pat, left_out, mult):
+    """
+    Safety net for a P&L line this reader does not know yet. When the profit read falls short of the profit the
+    filing prints, and one of the lines it left out as a summary (a "share of profit of ...", an unusual
+    exceptional item) accounts for the difference exactly in every year, that line is brought in -- as printed,
+    in its place (before or after tax) -- and the log names it.
+    """
+    from core.statements import compute_statements
+    years = sorted(fy_columns, key=lambda f: int(f[2:]))
+    if not left_out or not pat or any(pat.get(y) is None for y in years):
+        return
+    tol = max(1.0, 0.011 * mult)
+    statements = compute_statements(result.items, years)[0]
+    short = {y: pat[y] * mult - statements[y]["pat"] for y in years}
+    if all(abs(d) <= tol for d in short.values()):
+        return
+    for r, below, after in left_out:
+        values = pnl.values_of(r)
+        for sign in (1, -1):
+            if all(abs(sign * (values.get(y) or 0.0) * mult - short[y]) <= tol for y in years):
+                it = item(r.label, {y: sign * (values.get(y) or 0.0) for y in years}, "P&L", r.heading, r.page)
+                it.statement_tag, it.category, it.confidence = "", "Other Income", "Matched"
+                it.flags = [f for f in it.flags if f != "unplaced"]
+                if below or after:
+                    it.flags.append("below_total_expenses")
+                if after:
+                    it.flags.append("minority_interest")       # after tax: kept out of the profit-before-tax check
+                result.items.append(it)
+                result.log.append(f"WARNING: '{r.label}' was not a line this reader knows, but the profit the filing "
+                                  "prints includes it exactly, so it is included (as other income"
+                                  f"{', after tax' if after else ''}). Check its placement.")
+                return
+
+
+def _anchor_reserves(result, item, fy_columns, other_equity, pat, mult):
+    """
+    Reserves end every year at the Other equity the balance sheet prints. The statement of changes in equity
+    is used for the opening balance and the named movements, but filings vary (a misstated total column, a
+    restated opening, the non-controlling interest inside or outside it, components counted twice): whatever
+    it leaves unexplained becomes one labelled movement of the year, worked out with the profit the P&L
+    prints -- so a P&L that is read wrongly still shows as a P&L difference, it is never absorbed here.
+    """
+    from core.statements import compute_statements
+    years = sorted(fy_columns, key=lambda f: int(f[2:]))
+    if not other_equity or not pat or any(other_equity.get(y) is None or pat.get(y) is None for y in years):
+        return
+    tol = max(1.0, 0.011 * mult)
+    added = {}
+    for _ in years:
+        statements = compute_statements(result.items, years)[0]
+        p_and_l_error = 0.0               # what the reserves would be off by if only the P&L were read wrongly
+        fix = None
+        for y in years:
+            p_and_l_error += pat[y] * mult - statements[y]["pat"]
+            gap = other_equity[y] * mult - (statements[y]["reserves"] + p_and_l_error)
+            if abs(gap) > tol:
+                fix = (y, gap)
+                break
+        if fix is None:
+            break
+        y, gap = fix
+        added[y] = added.get(y, 0.0) + gap
+        it = item("Other movements in reserves (to the balance sheet's Other equity)", {y: gap / mult}, "BS",
+                  "Other equity", None, [], "pdf-note")
+        it.statement_tag, it.category, it.is_new, it.confidence = "Reserves Adjustments", "", False, "Matched"
+        it.flags = [f for f in it.flags if f != "unplaced"]
+        result.items.append(it)
+    for y, gap in added.items():
+        result.log.append(f"WARNING: Other equity {y}: the statement of changes in equity does not explain "
+                          f"{gap / mult:,.2f} of the year's change in reserves; it is shown as 'Other movements in "
+                          "reserves' so that reserves equal the balance sheet's Other equity.")
+
+
 def _deductions_to_flip(pnl, fy_columns):
     """
     Revenue lines printed with the sign their total does not use. The MCA form computes revenue as gross less
@@ -822,6 +895,8 @@ def map_xbrl(extraction, multiplier=None):
         result.log.append(f"{r.label}: a deduction in the revenue (gross less duties); the filing's own total "
                           f"takes it with the opposite sign to the one printed, so that sign is used.")
     below_total = False                 # past 'Total expenses': prior period / exceptional items, minority interest
+    after_tax = False                   # past 'Total profit before tax'
+    left_out = []                       # (row, below total expenses, after tax): lines read as summaries
     for r in pnl.rows:
         if not r.values:
             continue
@@ -830,7 +905,7 @@ def map_xbrl(extraction, multiplier=None):
             below_total = True
             continue
         if re.match(r"^total profit before tax", low):
-            below_total = False          # tax lines follow
+            below_total, after_tax = False, True          # tax lines follow
             continue
         if re.match(r"^total profit \(loss\) for period$", low):
             break
@@ -875,6 +950,9 @@ def map_xbrl(extraction, multiplier=None):
                 result.items.append(it)
             continue
         if r.is_total or (_SUMMARY_LINE.search(r.label) and not _PNL_ITEM_BELOW.search(r.label))                 or "comprehensive income" in low:
+            if not r.is_total and not re.search(r"per (?:equity )?share|attributable|comprehensive|before tax|"
+                                                r"for period|\[inr/shares\]", r.label, re.I):
+                left_out.append((r, below_total, after_tax))
             continue
         values = pnl.values_of(r)
         if any(r is f for f in flipped):
@@ -928,6 +1006,8 @@ def map_xbrl(extraction, multiplier=None):
             it.schedule_override = "COGS-Purchase"
             it.flags = [f for f in it.flags if f != "unplaced"]
             result.log.append(f"{it.line_item}: placed under purchases (Cost of goods sold)")
+    _recover_left_out(result, item, fy, pnl, pat, left_out, mult)
+    _anchor_reserves(result, item, fy, oe, pat, mult)
     if nci is not None and any(nci.fy_values.get(y) for y in fy):
         # Ind AS consolidated: the non-controlling interest is part of total equity. Where the statement of
         # changes in equity already rolls it into the reserves column (Krishi Rasayan) the balance sheet tallies

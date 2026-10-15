@@ -60,8 +60,11 @@ def compute_statements(line_items, fy_columns):
     totals, unplaced = schedule_totals(line_items, fy_columns)
     t = lambda key, fy: totals[key][fy]
     result = {}
-    previous_closing = None
+    previous_closing, previous_fy = None, None
     for index, fy in enumerate(fy_columns):
+        if previous_fy is not None and int(fy[2:]) != int(previous_fy[2:]) + 1:
+            previous_closing = None       # a year skipped in between: this year opens on its own opening balance
+        previous_fy = fy
         revenue = t("Revenue", fy)
         cogs = t("COGS-Purchase", fy) + t("Change in Inventories", fy)
         direct = t("COGS-Manufacturing", fy)

@@ -23,7 +23,7 @@ from config.schedule_map import column_map
 import ui
 from core import pipeline
 from core.routing import all_placeable_schedules, schedule_for
-from core.multi_year import Source, combine, fy_key, named_company, same_company
+from core.multi_year import Source, combine, default_years, fy_key, named_company, same_company
 from core.workbook_reader import merge_new_years, read_workbook
 
 st.set_page_config(page_title="Acumen | Common Size Generator", page_icon=None, layout="wide")
@@ -464,14 +464,7 @@ if existing:
         _stop()
     review_cols = st.multiselect("Years to add", later, default=later)
 else:
-    if len(sources) == 1:
-        # a third, older column of a single file is often only a partial comparative
-        default = available[-2:] if len(available) > 2 else available
-    else:
-        # with several files, the years that are some file's own current year; an older comparative-only
-        # year can still be ticked
-        currents = {s.current for s in sources}
-        default = [fy for fy in available if fy in currents] or available
+    default = default_years(len(sources), data["items"], available)
     review_cols = st.multiselect("Years to include", available, default=default)
 if not review_cols:
     _stop()

@@ -401,13 +401,21 @@ if readable:
     holder = st.expander("Units of the figures") if len(readable) > 1 else st.container()
     with holder:
         for i, s in readable:
+            where = f" in {s.name}" if len(sources) > 1 else ""
+            if getattr(s.extraction, "xbrl", None):
+                # an XBRL filing states its unit ("all monetary values are in INR"): nothing to choose
+                st.caption(f"Figures{where} are in {s.unit}, as the XBRL filing states. The workbook shows them in "
+                           "INR million; change the unit in the workbook's Income statement (cell B4) if needed.")
+                continue
             current = _unit_label(s.mult)
-            caption = f"Unit of the figures in {s.name} (detected: {s.unit})" if len(sources) > 1 \
-                else f"Unit of the figures (detected: {s.unit})"
+            caption = (f"Unit the figures are printed in{where}, in the uploaded file (detected: {s.unit}). "
+                       "Change it only if it was detected wrongly; the workbook's own unit is set in its cell B4.")
             chosen = st.selectbox(caption, labels, index=labels.index(current), key=f"unit-{i}")
             if UNIT_CHOICES[chosen] != s.mult:
                 s.items = pipeline.remap(s.extraction, UNIT_CHOICES[chosen]).items
                 s.mult, s.unit = UNIT_CHOICES[chosen], chosen
+                # the totals the file prints (profit, balance-sheet totals) are in the same unit as its lines
+                s.extraction.unit_multiplier, s.extraction.unit_label = UNIT_CHOICES[chosen], chosen
                 _combine_into(data)
                 st.session_state["review_version"] += 1
                 st.rerun()

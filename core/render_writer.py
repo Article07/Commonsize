@@ -179,32 +179,61 @@ def _place_in_spare(ws, key, item, fy_columns, report, used_spares):
     return row
 
 
-def _write_schedule_extras(ws, extras, fy_columns, report):
+BLOCK_TAG = "schedule: "                 # comment on a block's heading: the schedule its total is part of
+_STYLE_SCHEDULE = "Current Liability - Other"   # a plain total-last schedule whose rows give the blocks their look
+
+
+def _copy_style(ws, src_row, dst_row):
+    for c in range(1, 8):
+        a, b = ws.cell(src_row, c), ws.cell(dst_row, c)
+        if a.has_style:
+            b._style = copy(a._style)
+
+
+def _write_blocks(ws, blocks, fy_columns, report):
     """
-    Items that found no free spare row still count: they are listed in a block at the bottom of Sch. and that
-    block is added to the schedule's Total formula, so every statement picks them up without inserting a row.
+    Headings that are not in the Reference file, as the filing has them ("Non-current financial liabilities"), and
+    lines that found no free row: each block is a heading, a Particulars row, its lines (yellow) and a Total, at the
+    bottom of Sch. The block's Total is added to the Total of the schedule it belongs to, so the Balance Sheet /
+    Income statement line, the cash flow and the ratios all include it.
     """
-    row = ws.max_row + 3
-    for key, items in extras.items():
+    style = ALL_SCHEDULES[_STYLE_SCHEDULE]
+    row = ws.max_row + 2
+    for (key, title), items in blocks.items():
         sched = ALL_SCHEDULES[key]
-        ws.cell(row, 2).value = f"Additional items - {key}"
-        for col in "BCDEFG":
-            ws[f"{col}{row}"].fill = YELLOW
-        first = row + 1
-        for item in items:
-            row += 1
-            ws.cell(row, 2).value = item.line_item
+        target = str(ws.cell(sched["title_row"], 2).value or key).strip()
+        _copy_style(ws, style["title_row"], row)
+        ws.cell(row, 2).value = title
+        ws.cell(row, 2).comment = Comment(f"{BLOCK_TAG}{key}", "Commonsize app")
+        ws.cell(row, 8).value = f"Included in the total of '{target}'"
+        _copy_style(ws, style["title_row"] + 1, row + 1)
+        for c in range(2, 8):
+            ws.cell(row + 1, c).value = ws.cell(style["title_row"] + 1, c).value      # "Particulars", year headings
+        first = row + 2
+        for k, item in enumerate(items):
+            r = first + k
+            _copy_style(ws, style["first_item_row"], r)
+            ws.cell(r, 2).value = item.line_item
             for col in "BCDEFG":
-                ws[f"{col}{row}"].fill = YELLOW
-            ws[f"B{row}"].comment = _comment(item)
-            _clone_row_formulas(ws, sched["first_item_row"], row)
-            _add_values(ws, row, item, fy_columns, report)
-            report.placements.append(Placement(item.line_item, key, row, "extra", True))
+                ws[f"{col}{r}"].fill = YELLOW
+            ws[f"B{r}"].comment = _comment(item)
+            _clone_row_formulas(ws, sched["first_item_row"], r)
+            _add_values(ws, r, item, fy_columns, report)
+            report.placements.append(Placement(item.line_item, key, r, "new heading" if title != _extras_title(ws, key)
+                                               else "extra", True))
+        total = first + len(items)
+        _copy_style(ws, style["total_row"], total)
+        ws.cell(total, 2).value = "Total"
         for col in VALUE_COLUMNS:
+            ws[f"{col}{total}"].value = f"=SUM({col}{first}:{col}{total - 1})"
             cell = ws[f"{col}{sched['total_row']}"]
             if isinstance(cell.value, str) and cell.value.startswith("="):
-                cell.value = f"{cell.value}+SUM({col}{first}:{col}{row})"
-        row += 3
+                cell.value = f"{cell.value}+{col}{total}"
+        row = total + 2
+
+
+def _extras_title(ws, key):
+    return f"Additional items - {str(ws.cell(ALL_SCHEDULES[key]['title_row'], 2).value or key).strip()}"
 
 
 def _write_overflow_block(ws, items, fy_columns, report):
@@ -469,7 +498,7 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
     ws = wb[SHEET_NAME]
     wb["IS"]["B2"].value = company_name
 
-    used_spares, inventory_items, overflow, extras, filled = set(), [], [], {}, {}
+    used_spares, inventory_items, overflow, blocks, filled = set(), [], [], {}, {}
     for item in line_items:
         if item.statement not in ("P&L", "BS"):
             continue
@@ -513,6 +542,12 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
             report.placements.append(Placement(item.line_item, key, row, "special"))
             continue
 
+        total_cell = ws[f"C{sched['total_row']}"].value
+        can_extend = isinstance(total_cell, str) and total_cell.startswith("=")
+        if "new_heading" in item.flags and item.pdf_heading and can_extend:
+            blocks.setdefault((key, item.pdf_heading), []).append(item)
+            continue
+
         # a taxonomy match names the row; a heading / alias match only gives a fallback row, so the item's own
         # label ("Staff Welfare" -> "Workers and staff welfare") is tried first
         wanted = [item.matched_item, item.line_item]
@@ -539,19 +574,19 @@ def write_workbook(template_path, output_path, company_name, line_items, fy_colu
             filled[row] = item.line_item
             report.placements.append(Placement(item.line_item, key, row, "spare", True))
             continue
-        total_cell = ws[f"C{sched['total_row']}"].value
-        if sched.get("insertable", True) and isinstance(total_cell, str) and total_cell.startswith("=SUM("):
-            extras.setdefault(key, []).append(item)
+        if can_extend:
+            blocks.setdefault((key, _extras_title(ws, key)), []).append(item)
         else:
             overflow.append((item, f"no free row left in '{key}'"))
             report.placements.append(Placement(item.line_item, key, 0, "unplaced", True))
 
     if inventory_items:
         _write_change_in_inventories(ws, inventory_items, fy_columns, report.columns)
-    if extras:
-        _write_schedule_extras(ws, extras, fy_columns, report)
-        report.log.append(f"NOTE: {sum(len(v) for v in extras.values())} new item(s) did not fit in the template's spare rows; "
-                          f"they are listed under 'Additional items' at the bottom of '{SHEET_NAME}' and are included in the totals.")
+    if blocks:
+        _write_blocks(ws, blocks, fy_columns, report)
+        report.log.append(f"NOTE: {sum(len(v) for v in blocks.values())} line(s) are under heading(s) added at the bottom of "
+                          f"'{SHEET_NAME}' ({', '.join(t for _, t in blocks)}); each block's total is included in the "
+                          "schedule it belongs to.")
     if overflow:
         _write_overflow_block(ws, overflow, fy_columns, report)
         report.unplaced = [i for i, _ in overflow]

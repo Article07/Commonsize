@@ -441,6 +441,13 @@ for s in sources:
     if names[s.name] and reference and not same_company(names[s.name], reference):
         st.error(f"{s.name} is the financials of '{names[s.name]}', not '{reference}'. "
                  "Remove it if it belongs to another company.")
+new_lines = [i for i in data["items"] if "placed_by_position" in i.flags]
+if new_lines:
+    headed = sorted({i.pdf_heading for i in new_lines if "new_heading" in i.flags})
+    st.warning(f"{len(new_lines)} line(s) are not ones the app knows, so they were placed as the financials classify "
+               "them, highlighted yellow: " + "; ".join(i.line_item for i in new_lines)
+               + (f". New heading(s) added to the workbook, as in the financials: {', '.join(headed)}." if headed else ".")
+               + " Check where they sit in the table below ('Place under') before downloading.")
 with st.expander("What the reader found and checked"):
     for s in sources:
         if len(sources) > 1:

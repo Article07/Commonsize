@@ -15,7 +15,7 @@ import openpyxl
 
 from config.schedule_map import ALL_SCHEDULES, FY_COLUMN_MAP, SHEET_NAME, column_map
 from core.models import LineItem
-from core.render_writer import REMOVED_ROWS_PROPERTY, expand_ranges
+from core.render_writer import BLOCK_TAG, REMOVED_ROWS_PROPERTY, expand_ranges
 from core.routing import CHANGE_IN_INVENTORIES
 
 PNL_SCHEDULES = {
@@ -60,6 +60,36 @@ def _values(ws, row, columns):
 
 def _has_value(values):
     return any(v for v in values.values())
+
+
+def _read_blocks(ws, columns, data):
+    """
+    Headings the app added below the template ("Current financial liabilities", "Additional items - ..."): each is a
+    heading whose comment names the schedule it belongs to, a Particulars row, its lines and a Total. Their lines are
+    read back so the next year's workbook keeps them under the same heading.
+    """
+    end = max(max(s["total_row"], s["last_item_row"]) for s in ALL_SCHEDULES.values())
+    r = end + 1
+    while r <= ws.max_row:
+        comment = ws.cell(r, 2).comment
+        text = comment.text if comment else ""
+        if not text.startswith(BLOCK_TAG):
+            r += 1
+            continue
+        key, title = text[len(BLOCK_TAG):].strip(), str(ws.cell(r, 2).value or "").strip()
+        r += 1
+        while r <= ws.max_row and str(ws.cell(r, 2).value or "").strip().lower() != "total":
+            label = str(ws.cell(r, 2).value or "").strip()
+            values = _values(ws, r, columns)
+            if label and label.lower() != "particulars" and _has_value(values) and key in ALL_SCHEDULES:
+                added = not title.lower().startswith("additional items")
+                data.items.append(LineItem(
+                    statement="P&L" if key in PNL_SCHEDULES else "BS", line_item=label, statement_tag="",
+                    fy_values=values, source="workbook", is_new=True, schedule_override=key,
+                    pdf_heading=title if added else "", flags=["new_heading"] if added else [],
+                    confidence="Uncertain (new item)"))
+            r += 1
+        r += 1
 
 
 def read_workbook(path):
@@ -115,6 +145,8 @@ def read_workbook(path):
                 source="workbook", is_new=is_new, schedule_override=key_here,
                 pdf_heading=(comment.text if comment else ""), confidence="Matched" if not is_new else "Uncertain (new item)",
             ))
+
+    _read_blocks(ws, columns, data)
 
     opening, closing = (ALL_SCHEDULES[k]["first_item_row"] for k in _STOCK_ROWS)
     op, cl = _values(ws, opening, columns), _values(ws, closing, columns)

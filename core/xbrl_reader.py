@@ -54,6 +54,7 @@ class Row:
     heading: str                      # the nearest "[Abstract]" heading above
     page: int
     is_total: bool = False
+    path: tuple = ()                  # every heading it sits under, outermost first
 
 
 @dataclass
@@ -195,7 +196,7 @@ def _sections(lines):
             heading = re.sub(r"\s*\[abstract\]$", "", line, flags=re.I)
             if pending is not None and (not heading or heading[:1].islower()):
                 heading = f"{pending} {heading}".strip()     # a heading wrapped before "[Abstract]"
-            table.rows.append(Row(heading, [], heading, page))       # a heading marker (no values)
+            table.rows.append(Row(heading, [], heading, page, path=tuple(table.open)))   # a heading marker
             table.open.append(heading)
             pending = None
             continue
@@ -211,7 +212,7 @@ def _sections(lines):
             continue
         heading = table.open[-1] if table.open else ""
         is_total = bool(re.match(r"^total\b", label, re.I))
-        table.rows.append(Row(label, values, heading, page, is_total))
+        table.rows.append(Row(label, values, heading, page, is_total, tuple(table.open)))
         if is_total and heading and _closes(label, heading):
             # the group's total: lines after it (a "CSR expenditure" below depreciation) are not part of it
             table.open.pop()
@@ -543,6 +544,58 @@ def _note_parts(candidates, label, values, fy_columns):
     return None
 
 
+# headings that only name a part of the statement; a line directly under one of them gets a row of the schedule
+# its section belongs to, a line under any other (more particular) heading gets that heading as a new heading
+_SECTION_HEADING = re.compile(
+    r"^(?:balance sheet|assets|equity and liabilities|equity|liabilities|shareholders'? funds|non.?current assets|"
+    r"current assets|non.?current liabilities|current liabilities|equity attributable to .*|statement of profit and "
+    r"loss|income|expenses|tax expense|total .*|.*\[line ?items\].*|.*line items)$", re.I)
+
+
+def _bs_target(path, assets_side):
+    """Schedule for an unrecognised Balance Sheet line, from the section the filing puts it in."""
+    for h in reversed(path):
+        h = h.lower()
+        if re.search(r"non.?current assets", h):
+            return "Long-term Loans & Advances"
+        if re.search(r"^current assets|current financial assets", h):
+            return "Current Asset - Other"
+        if re.search(r"liabilities", h) and not re.search(r"equity and liabilities", h):
+            return "Current Liability - Other"
+        if re.search(r"^equity$|shareholders|equity attributable", h):
+            return "Other Reserves"
+    return "Current Asset - Other" if assets_side else "Current Liability - Other"
+
+
+_ASSET_SCHEDULES = {"Fixed Assets", "Investments", "Current Investments", "Cash & Bank", "Trade Receivables", "Inventory",
+                    "Long-term Loans & Advances", "Short-term Loans & Advances", "Current Asset - Other",
+                    "Deferred Tax Assets"}
+
+
+def _schedule_of_heading(heading, statement, section_schedule):
+    """The Reference file's schedule for a filing heading ("Fixed assets" -> Fixed Assets), on the same side of the
+    statement as the line's section; None when the Reference file has no such heading."""
+    from core.models import LineItem
+    from core.resolver import resolve
+    res = resolve(heading, "", statement)
+    if not res.resolved or res.via == "heading":
+        return None
+    key = schedule_for(LineItem(statement, heading, res.tag, {}, category=res.category))
+    if key is None or key in ("Reserves and Surplus", "Reserves Adjustments", CHANGE_IN_INVENTORIES):
+        return None
+    if statement == "BS" and (key in _ASSET_SCHEDULES) != (section_schedule in _ASSET_SCHEDULES):
+        return None                       # a heading word on the other side of the balance sheet
+    return key
+
+
+def _new_heading(path):
+    """The filing's own heading for a line, when it is more particular than a part of the statement."""
+    for h in reversed(path):
+        if h and not _SECTION_HEADING.match(h.strip()):
+            return h.strip()
+    return None
+
+
 def _equity_components(tables):
     """(securities premium {fy: balance} | None, other reserves (name, {fy: balance}) | None): each component's
     balance at the end of each year, from the changes in equity / reserves tables."""
@@ -648,6 +701,52 @@ def _anchor_reserves(result, item, fy_columns, other_equity, pat, mult):
                           "reserves' so that reserves equal the balance sheet's Other equity.")
 
 
+def _group_checks(table, fy_columns):
+    """
+    Every printed total that closes a heading ("Total current assets", "Total expenses", "Total tax expense") is
+    the sum of what sits under that heading. -> (rows whose sign must turn so their group adds up -- only where
+    turning one row makes every year add up --, notes on groups that do not add up at all, naming them).
+    """
+    rows = [r for r in table.rows if r.values]
+    flips, notes = [], []
+    for t in rows:
+        if not t.is_total or not t.path or not _closes(t.label, t.path[-1]) or re.search(r"comprehensive", t.label, re.I):
+            continue                      # (total comprehensive income is the profit plus OCI, not its group's sum)
+        depth = len(t.path)
+        below = [r for r in rows if r is not t and len(r.path) >= depth and r.path[:depth] == t.path]
+        parts = [r for r in below if len(r.path) == depth and not (r.is_total and _closes(r.label, t.path[-1]))]
+        for child in dict.fromkeys(r.path[depth] for r in below if len(r.path) > depth):
+            inner = [r for r in below if len(r.path) > depth and r.path[depth] == child]
+            sub_total = next((r for r in inner if r.is_total and len(r.path) == depth + 1 and _closes(r.label, child)), None)
+            parts += [sub_total] if sub_total else [r for r in inner if len(r.path) == depth + 1 and not r.is_total]
+        if not parts:
+            continue
+        total = table.values_of(t)
+
+        def adds_up(flip=None):
+            for y in fy_columns:
+                if total.get(y) is None:
+                    continue
+                got = sum((-1 if r is flip else 1) * (table.values_of(r).get(y) or 0.0) for r in parts)
+                if abs(got - total[y]) > TOL + 0.005 * len(parts):
+                    return False
+            return True
+
+        if adds_up():
+            continue
+        fix = [r for r in parts if not r.is_total and any(table.values_of(r).get(y) for y in fy_columns) and adds_up(r)]
+        if len(fix) == 1:
+            flips.append(fix[0])
+            notes.append(f"{fix[0].label}: printed with the sign the filing's own '{t.label}' does not use; that "
+                         "total's sign is used.")
+        else:
+            y = next(y for y in fy_columns if total.get(y) is not None)
+            got = sum(table.values_of(r).get(y) or 0.0 for r in parts)
+            notes.append(f"WARNING: the lines under '{t.path[-1]}' add up to {got:,.2f} in {y}, not to the "
+                         f"{total[y]:,.2f} the filing prints as '{t.label}'.")
+    return flips, notes
+
+
 def _deductions_to_flip(pnl, fy_columns):
     """
     Revenue lines printed with the sign their total does not use. The MCA form computes revenue as gross less
@@ -724,11 +823,35 @@ def map_xbrl(extraction, multiplier=None):
     groups = _note_groups(notes)
     result = MappingResult()
 
+    def place_by_position(it, path, schedule, how):
+        """
+        A line the taxonomy and aliases do not know: placed where the filing classifies it, never dropped. Under a
+        heading the Reference file has ("Fixed assets") it goes into that schedule; under one it does not have
+        ("Current financial liabilities") into a new heading of that name, within the schedule its section belongs to.
+        """
+        if schedule_for(it) is not None:
+            return it
+        it.flags = [f for f in it.flags if f != "unplaced"] + ["placed_by_position"]
+        it.is_new = True
+        heading = _new_heading(path) if schedule not in ("Other Reserves",) else None
+        known = _schedule_of_heading(heading, it.statement, schedule) if heading else None
+        if known:
+            schedule, heading = known, None
+            how = f"under the filing's heading {_new_heading(path)!r}, which the Reference file has"
+        it.schedule_override = schedule
+        if heading:
+            it.flags.append("new_heading")
+            it.pdf_heading = heading
+        result.log.append(f"WARNING: '{it.line_item}' is not a line the app knows; placed {how}"
+                          f"{f' under a new heading {heading!r}' if heading else ''} (highlighted yellow) -- check it.")
+        return it
+
     def item(label, values, statement, heading, page, flags=(), source="pdf-face"):
         return _make_item(label, {k: v for k, v in values.items() if k in fy}, statement, heading, source, page,
                           list(flags) + ["own_row"], fy, mult)
 
     nci = None
+    equity_extra = []                     # equity lines besides share capital and other equity (placed by position)
     tables = getattr(extraction, "xbrl_tables", None) or []
     note_sets = _note_candidates(tables, fy)
     issued_text, authorised_text, issued_value = _share_capital_labels(_content_lines(extraction.pages))
@@ -750,6 +873,8 @@ def map_xbrl(extraction, multiplier=None):
         result.log.append(f"{r.label}: itemised from its footnote ({len(parts)} lines)")
 
     # ---- Balance sheet
+    bs_flips, bs_notes = _group_checks(bs, fy)
+    result.log += bs_notes
     assets_side = None
     for r in bs.rows:
         if not r.values:
@@ -761,9 +886,16 @@ def map_xbrl(extraction, multiplier=None):
         if r.is_total or re.search(r"^other equity$|^reserves and surplus$|equity attributable", r.label, re.I):
             continue
         values = bs.values_of(r)
+        if any(r is f for f in bs_flips):
+            values = {y: -v for y, v in values.items()}
         if all(not values.get(y) for y in fy):
             continue
         base = _side_rules(item(r.label, values, "BS", r.heading, r.page), "BS", r.label, assets_side)
+        target = _bs_target(r.path, assets_side)
+        base = place_by_position(base, r.path, target, f"in {target} (as the filing classifies it)")
+        if target == "Other Reserves" and "placed_by_position" in base.flags:
+            base.statement_tag, base.schedule_override = "Other Reserves", ""
+            equity_extra.append(base)
         if re.match(r"^non.?controlling interests?$", r.label, re.I):
             nci = base                    # decided at the end: some filings already carry it in their reserves
             continue
@@ -894,13 +1026,22 @@ def map_xbrl(extraction, multiplier=None):
     for r in flipped:
         result.log.append(f"{r.label}: a deduction in the revenue (gross less duties); the filing's own total "
                           f"takes it with the opposite sign to the one printed, so that sign is used.")
+    pnl_flips, pnl_notes = _group_checks(pnl, fy)
+    for r, note in zip(pnl_flips, [n for n in pnl_notes if not n.startswith("WARNING")]):
+        if not any(r is f for f in flipped):
+            flipped.append(r)
+            result.log.append(note)
+    result.log += [n for n in pnl_notes if n.startswith("WARNING")]
     below_total = False                 # past 'Total expenses': prior period / exceptional items, minority interest
     after_tax = False                   # past 'Total profit before tax'
+    after_income = False                # past 'Total income'
     left_out = []                       # (row, below total expenses, after tax): lines read as summaries
     for r in pnl.rows:
         if not r.values:
             continue
         low = r.label.lower()
+        if re.match(r"^total (?:income|revenue)$", low):
+            after_income = True
         if re.match(r"^total expenses", low):
             below_total = True
             continue
@@ -960,6 +1101,20 @@ def map_xbrl(extraction, multiplier=None):
         if all(not values.get(y) for y in fy):
             continue
         base = item(r.label, values, "P&L", r.heading, r.page, ["below_total_expenses"] if below_total else [])
+        if schedule_for(base) is None:
+            if after_tax:
+                where = ("Tax Expense", "with tax") if re.search(r"tax", " ".join(r.path), re.I) else \
+                    ("Other Income", "after tax")
+            elif below_total:
+                where = ("Other Income", "after total expenses")
+            elif after_income:
+                where = ("Administrative Expenses", "among the expenses")
+            else:
+                where = ("Revenue", "in revenue") if re.search(r"revenue from operations", " ".join(r.path), re.I) \
+                    else ("Other Income", "in other income")
+            base = place_by_position(base, r.path, where[0], where[1])
+            if after_tax and where[0] == "Other Income":
+                base.flags += ["below_total_expenses", "minority_interest"]
         if _PURCHASES.match(r.label):
             # in the XBRL statements these are the purchases: Sch. Cost of goods sold, "Cost of materials consumed"
             # below "Purchase of traded goods" (one line each, not itemised)
@@ -1007,7 +1162,9 @@ def map_xbrl(extraction, multiplier=None):
             it.flags = [f for f in it.flags if f != "unplaced"]
             result.log.append(f"{it.line_item}: placed under purchases (Cost of goods sold)")
     _recover_left_out(result, item, fy, pnl, pat, left_out, mult)
-    _anchor_reserves(result, item, fy, oe, pat, mult)
+    extra = {y: sum((e.fy_values.get(y) or 0.0) for e in equity_extra) / mult for y in fy}
+    target_equity = {y: v + extra[y] for y, v in oe.items()} if oe else oe
+    _anchor_reserves(result, item, fy, target_equity, pat, mult)
     if nci is not None and any(nci.fy_values.get(y) for y in fy):
         # Ind AS consolidated: the non-controlling interest is part of total equity. Where the statement of
         # changes in equity already rolls it into the reserves column (Krishi Rasayan) the balance sheet tallies

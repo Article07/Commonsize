@@ -649,6 +649,7 @@ def _recover_left_out(result, item, fy_columns, pnl, pat, left_out, mult):
         for sign in (1, -1):
             if all(abs(sign * (values.get(y) or 0.0) * mult - short[y]) <= tol for y in years):
                 it = item(r.label, {y: sign * (values.get(y) or 0.0) for y in years}, "P&L", r.heading, r.page)
+                it.face_line, it.face_sign = r.label, sign
                 it.statement_tag, it.category, it.confidence = "", "Other Income", "Matched"
                 it.flags = [f for f in it.flags if f != "unplaced"]
                 if below or after:
@@ -692,6 +693,7 @@ def _anchor_reserves(result, item, fy_columns, other_equity, pat, mult):
         added[y] = added.get(y, 0.0) + gap
         it = item("Other movements in reserves (to the balance sheet's Other equity)", {y: gap / mult}, "BS",
                   "Other equity", None, [], "pdf-note")
+        it.face_line = next((i.face_line for i in result.items if i.statement_tag == "Opening Reserves"), "Other equity")
         it.statement_tag, it.category, it.is_new, it.confidence = "Reserves Adjustments", "", False, "Matched"
         it.flags = [f for f in it.flags if f != "unplaced"]
         result.items.append(it)
@@ -876,7 +878,10 @@ def map_xbrl(extraction, multiplier=None):
     bs_flips, bs_notes = _group_checks(bs, fy)
     result.log += bs_notes
     assets_side = None
+    starts = []                           # (first item index, face line, sign): lines created for that face line
     for r in bs.rows:
+        if r.values:
+            starts.append((len(result.items), r.label, -1 if any(r is f for f in bs_flips) else 1))
         if not r.values:
             if re.match(r"^assets$", r.label, re.I):
                 assets_side = True
@@ -898,6 +903,7 @@ def map_xbrl(extraction, multiplier=None):
             equity_extra.append(base)
         if re.match(r"^non.?controlling interests?$", r.label, re.I):
             nci = base                    # decided at the end: some filings already carry it in their reserves
+            nci.face_line = r.label
             continue
         latest = max(fy, key=lambda f: int(f[2:]))
         if re.search(r"share capital", r.label, re.I) and issued_text and base.fy_values.get(latest) \
@@ -923,6 +929,7 @@ def map_xbrl(extraction, multiplier=None):
             continue
         add_with_breakdown(bs, r, "BS", r.heading, base)
 
+    reserves_from = len(result.items)
     # ---- Other equity: opening balance and movements from the statement of changes in equity
     other_equity = next((r for r in bs.rows if r.values and re.match(r"^other equity$|^reserves and surplus$", r.label, re.I)), None)
     pat_row = next((r for r in pnl.rows if r.values and re.match(r"^total profit \(loss\) for period$", r.label, re.I)), None)
@@ -1021,6 +1028,8 @@ def map_xbrl(extraction, multiplier=None):
             it.flags = [f for f in it.flags if f != "unplaced"]
             result.items.append(it)
 
+    equity_label = other_equity.label if other_equity is not None else "Other equity"
+    starts.append((reserves_from, equity_label, 1))
     # ---- Statement of profit and loss
     flipped = _deductions_to_flip(pnl, fy)
     for r in flipped:
@@ -1039,6 +1048,7 @@ def map_xbrl(extraction, multiplier=None):
     for r in pnl.rows:
         if not r.values:
             continue
+        starts.append((len(result.items), r.label, None))     # sign settled below, once 'flipped' is final
         low = r.label.lower()
         if re.match(r"^total (?:income|revenue)$", low):
             after_income = True
@@ -1066,6 +1076,7 @@ def map_xbrl(extraction, multiplier=None):
                     if all(abs(v) < TOL for v in share.values()):
                         continue
                     it = item(name, share, "P&L", r.heading, r.page)
+                    it.face_line = assoc_row.label if assoc_row is not None and name.startswith("Share of profit") else r.label
                     it.statement_tag, it.category, it.confidence = "", "Other Income", "Matched"
                     it.flags = [f for f in it.flags if f != "unplaced"] + ["minority_interest", "below_total_expenses"]
                     result.items.append(it)
@@ -1161,6 +1172,13 @@ def map_xbrl(extraction, multiplier=None):
             it.schedule_override = "COGS-Purchase"
             it.flags = [f for f in it.flags if f != "unplaced"]
             result.log.append(f"{it.line_item}: placed under purchases (Cost of goods sold)")
+    for k, (first, face_label, sign) in enumerate(starts):
+        nxt = starts[k + 1][0] if k + 1 < len(starts) else len(result.items)
+        if sign is None:
+            sign = -1 if any(f.label == face_label for f in flipped) else 1
+        for it in result.items[first:nxt]:
+            if not it.face_line:
+                it.face_line, it.face_sign = face_label, sign
     _recover_left_out(result, item, fy, pnl, pat, left_out, mult)
     extra = {y: sum((e.fy_values.get(y) or 0.0) for e in equity_extra) / mult for y in fy}
     target_equity = {y: v + extra[y] for y, v in oe.items()} if oe else oe

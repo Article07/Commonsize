@@ -81,6 +81,21 @@ html, body {{ overflow-x: hidden; }}
     font-size: 16px; margin-bottom: 4px; }}
 div.stButton > button[kind="primary"], div.stDownloadButton > button {{
     background: {RED}; border: 0; color: #fff; font-weight: 500; padding: .55rem 1.4rem; border-radius: 4px; }}
+.sv-head {{ color: {GREY}; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; line-height: 1.3;
+           border-bottom: 2px solid {NAVY}; padding-bottom: 4px; }}
+[class*="st-key-svtable-"] [data-testid="stVerticalBlock"] {{ gap: 0; }}
+[class*="st-key-svtable-"] [data-testid="stHorizontalBlock"] {{ gap: .6rem; align-items: center;
+    border-bottom: 1px solid #F1F5F9; min-height: 30px; }}
+[class*="st-key-svtable-"] [data-testid="stMarkdownContainer"] {{ margin-bottom: 0 !important; }}
+[class*="st-key-svtable-"] [data-testid="stMarkdownContainer"] p {{ margin: 0; }}
+[class*="st-key-svtable-"] [data-testid="stElementContainer"]:has([data-testid="stDataFrame"]) {{ margin: 6px 0 12px; }}
+.sv-num {{ text-align: right; font-variant-numeric: tabular-nums; font-size: 14px; white-space: nowrap; }}
+.sv-zero {{ color: #9CA3AF; }}
+.sv-label {{ font-size: 14px; color: {NAVY}; }}
+[class*="st-key-svbtn-"] button {{ justify-content: flex-start; text-align: left; padding: 0; min-height: 0;
+    color: {NAVY}; font-size: 14px; }}
+[class*="st-key-svbtn-"] button:hover {{ color: {RED}; }}
+[class*="st-key-svbtn-"] button p {{ text-align: left; }}
 div.stButton > button[kind="primary"]:hover, div.stDownloadButton > button:hover {{ background: #DC2626; color: #fff; }}
 </style>
 """

@@ -291,6 +291,7 @@ def _make_item(label, values, statement, heading, source, page, flags, fy_column
     )
     if income_signed:
         li.fy_values = {fy: (-v if v else v) for fy, v in li.fy_values.items()}
+        li.face_sign = -1                 # the face prints it the other way round ("Add: Excess provision of tax")
     if res.known:
         li.confidence = "Matched"
     elif res.resolved:
@@ -405,6 +406,8 @@ _RES_CLOSING = re.compile(r"closing|balance\s*at\s*the\s*end|end\s*of\s*the\s*ye
 
 def _res_sum(g, pattern, fy):
     vals = [r.values.get(fy) for r in g.items if pattern.search(r.label) and r.values.get(fy) is not None]
+    if len(vals) >= 2 and vals[-1] and abs(vals[-1] - sum(vals[:-1])) <= TOL * len(vals):
+        return vals[-1]       # "Closing balance of reserves and surplus (A+B)": the total of the components above
     return sum(vals) if vals else None
 
 
@@ -535,6 +538,9 @@ def map_extraction(extraction, unit_multiplier=None):
     face_reserves = next((r for r in face if r.statement == "BS" and (_RESERVES.search(r.label) or _OWNERS_CAPITAL.search(r.label))
                           and _has_values(r)), None)
     _map_reserves(groups, fy, mult, result, face_reserves, note_scale)
+    for it in result.items:
+        it.face_line = it.face_line or (face_reserves.label if face_reserves is not None else "Reserves and surplus")
+    starts = []                           # (first item index, face line): lines created while reading that face line
 
     assets_side, seen_total = None, False   # where on the balance sheet the line sits
     replaced_parents = set()
@@ -546,6 +552,7 @@ def map_extraction(extraction, unit_multiplier=None):
             continue
         pseudo = replace(children[0], label=heading, note_ref=re.search(r"(\d{1,2})\W*$", heading).group(1)
                          if re.search(r"(\d{1,2})\W*$", heading) else "")
+        starts.append((len(result.items), heading))
         pg = _pick_group(groups, pseudo)
         if pg is None or not _is_digital(pg) or pg.total is None or not _has_values(pg.total):
             continue
@@ -575,6 +582,7 @@ def map_extraction(extraction, unit_multiplier=None):
     end = next((i for i, r in enumerate(pnl) if re.search(r"^(?:net\s*)?profit\s*before\s*tax", r.label, re.I)), None)
     below_total = {id(r) for r in pnl[start + 1:end]} if start is not None and end is not None and end > start else set()
     for F in face:
+        starts.append((len(result.items), F.label))
         label = F.label
         F_original = F
         below_line = id(F) in below_total
@@ -736,4 +744,7 @@ def map_extraction(extraction, unit_multiplier=None):
         else:
             result.skipped.append((label, "no figures found"))
 
+    for (first, face_label), nxt in zip(starts, starts[1:] + [(len(result.items), "")]):
+        for it in result.items[first:nxt[0]]:
+            it.face_line = it.face_line or face_label
     return result

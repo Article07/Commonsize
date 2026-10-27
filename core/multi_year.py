@@ -149,7 +149,10 @@ def combine(sources):
             values = {fy: item.fy_values.get(fy) for fy in years if item.fy_values.get(fy) is not None}
             if not values:
                 continue
-            key = (item.statement, _norm(item.line_item), schedule_for(item) or "", item.statement_tag)
+            # the face line too: 'Lease liabilities' under non-current and under current liabilities are two lines
+            # on the review page (the workbook adds them into one row all the same)
+            key = (item.statement, _norm(item.line_item), schedule_for(item) or "", item.statement_tag,
+                   _norm(item.face_line))
             target = merged.get(key)
             if target is None:
                 target = deepcopy(item)

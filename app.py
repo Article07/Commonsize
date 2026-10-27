@@ -10,6 +10,7 @@ firm's Reference file. Everything is rule-based; no AI service is called.
 
 import hashlib
 import hmac
+import html
 import os
 import tempfile
 import time
@@ -21,7 +22,7 @@ import streamlit.components.v1 as components
 
 from config.schedule_map import column_map
 import ui
-from core import pipeline
+from core import pipeline, statement_view
 from core.routing import all_placeable_schedules, schedule_for
 from core.multi_year import Source, combine, default_years, fy_key, named_company, same_company
 from core.workbook_reader import merge_new_years, read_workbook
@@ -145,6 +146,108 @@ def _review_table(items, fy_cols, mult, unit_label, key):
         item.fy_values = {fy: (None if pd.isna(row[fy]) else float(row[fy]) * mult) for fy in fy_cols}
         final.append(item)
     return final
+
+
+def _cell(value, bold=False, colour=""):
+    text = "" if value is None else _fmt(value)
+    style = ("font-weight:600;" if bold else "") + (f"color:{colour};" if colour else "")
+    return f'<div class="sv-num" style="{style}">{text}</div>'
+
+
+def _toggle(key):
+    st.session_state[key] = not st.session_state.get(key, False)
+
+
+def _edit_lines(row_items, fy_cols, mult, key):
+    """The line items behind one face line, editable in place. Returns True when the user changed something."""
+    options = [NOT_PLACED] + all_placeable_schedules()
+    df = pd.DataFrame([{
+        "Include": "excluded_by_user" not in i.flags,
+        "Line item": i.line_item,
+        "Place under": schedule_for(i) or NOT_PLACED,
+        # as the face prints it: a duty deducted from revenue shows as the deduction it is
+        **{fy: (None if i.fy_values.get(fy) is None else i.fy_values[fy] * i.face_sign / mult) for fy in fy_cols},
+        "New (yellow)": i.is_new,
+        "Flags": ", ".join(f for f in i.flags if f not in ("ocr", "excluded_by_user")),
+        "Page": i.pdf_page or None,
+    } for i in row_items])
+    edited = st.data_editor(
+        df, key=key, hide_index=True, width="stretch", num_rows="fixed",
+        column_config={
+            "Place under": st.column_config.SelectboxColumn(options=options, required=True),
+            "Include": st.column_config.CheckboxColumn(),
+            **{fy: st.column_config.NumberColumn(format="%.2f") for fy in fy_cols},
+        },
+        disabled=["New (yellow)", "Flags", "Page"])
+    changed = False
+    for item, (_, row), (_, before) in zip(row_items, edited.iterrows(), df.iterrows()):
+        if bool(row["Include"]) != bool(before["Include"]):
+            if row["Include"]:
+                item.flags = [f for f in item.flags if f != "excluded_by_user"]
+            else:
+                item.flags.append("excluded_by_user")
+            changed = True
+        if row["Place under"] != before["Place under"]:
+            item.schedule_override = "" if row["Place under"] == NOT_PLACED else row["Place under"]
+            changed = True
+        if row["Line item"] != before["Line item"]:
+            item.line_item = row["Line item"]
+            changed = True
+        for fy in fy_cols:
+            new, old = row[fy], before[fy]
+            if pd.isna(new) and pd.isna(old) or (not pd.isna(new) and not pd.isna(old) and abs(new - old) < 1e-9):
+                continue
+            item.fy_values[fy] = None if pd.isna(new) else float(new) * mult * item.face_sign
+            changed = True
+    return changed
+
+
+def _statement_review(data, items, fy_cols, mult, unit_label, source_word, key):
+    """
+    Step 2 for files the app read itself: the Income Statement and Balance Sheet laid out as the file prints them,
+    each year as per the file, as the common size adds up, and the difference. A line opens on click to show the
+    line items behind it, editable in place. Returns the items to use (unticked ones left out).
+    """
+    st.caption(f"Amounts are in {unit_label}. Click a line to open the line items behind it: correct a misread "
+               "figure, choose a different schedule in 'Place under', or untick Include. The figures update as you edit.")
+    widths = [3.0] + [1.25, 1.25, 1.0] * len(fy_cols)
+    changed = False
+    for statement, title in (("P&L", "Income Statement"), ("BS", "Balance Sheet")):
+        rows = statement_view.build(statement, data["sources"], data["owner"], fy_cols, items, mult)
+        if not rows:
+            continue
+        st.markdown(f"#### {title}")
+        table = st.container(key=f"svtable-{'pl' if statement == 'P&L' else 'bs'}")
+        head = table.columns(widths, vertical_alignment="bottom")
+        head[0].markdown('<div class="sv-head">Particulars</div>', unsafe_allow_html=True)
+        for n, fy in enumerate(fy_cols):
+            for j, text in enumerate((f"{fy}<br>As per {source_word}", f"{fy}<br>Common size", f"{fy}<br>Difference")):
+                head[1 + 3 * n + j].markdown(f'<div class="sv-head sv-num">{text}</div>', unsafe_allow_html=True)
+        prefix = "pl" if statement == "P&L" else "bs"
+        for k, row in enumerate(rows):
+            open_key = f"svopen-{prefix}-{k}-{statement_view.norm(row.label)[:40]}"
+            cols = table.columns(widths, vertical_alignment="center")
+            if row.items:
+                arrow = "▾" if st.session_state.get(open_key) else "▸"
+                cols[0].button(f"{arrow} {row.label}", key=f"svbtn-{open_key}", type="tertiary",
+                               on_click=_toggle, args=(open_key,))
+            else:
+                weight = "600" if row.is_total else "400"
+                cols[0].markdown(f'<div class="sv-label" style="font-weight:{weight}">{html.escape(row.label)}</div>',
+                                 unsafe_allow_html=True)
+            for n, fy in enumerate(fy_cols):
+                d = row.difference(fy)
+                cols[1 + 3 * n].markdown(_cell(row.as_per.get(fy), row.is_total), unsafe_allow_html=True)
+                cols[2 + 3 * n].markdown(_cell(row.common_size.get(fy), row.is_total), unsafe_allow_html=True)
+                diff = ('<div class="sv-num"></div>' if d is None else
+                        '<div class="sv-num sv-zero">–</div>' if d == 0 else _cell(d, True, ui.RED))
+                cols[3 + 3 * n].markdown(diff, unsafe_allow_html=True)
+            if row.items and st.session_state.get(open_key):
+                with table:
+                    changed |= _edit_lines(row.items, fy_cols, mult, key=f"{key}-{open_key}")
+    if changed:
+        st.rerun()
+    return [i for i in items if "excluded_by_user" not in i.flags]
 
 
 def _balance_panel(items, fy_cols, mult, unit_label, whole_units=False, tol_mult=None):
@@ -477,7 +580,12 @@ if not review_cols:
     _stop()
 review_cols = sorted(review_cols, key=fy_key)
 
-items = _review_table(data["items"], review_cols, mult, unit, key=f"review-{sig}-{st.session_state['review_version']}")
+review_key = f"review-{sig}-{st.session_state['review_version']}"
+if all(s.extraction is not None for s in sources):
+    items = _statement_review(data, data["items"], review_cols, mult, unit, "Excel" if kind == "excel" else "PDF",
+                              review_key)
+else:      # a structured Excel sheet has no printed face to lay out: the plain table of its lines
+    items = _review_table(data["items"], review_cols, mult, unit, key=review_key)
 reported_all = _reported(data, review_cols)
 
 ui.step(3, "Check the numbers", "The balance sheet must tally and the income statement must match the input.")

@@ -30,6 +30,8 @@ class LineItem:
     flags: list = field(default_factory=list)
     alt_values: dict = field(default_factory=dict)  # figure the note shows when it differs from the face figure (rupees)
     stock_levels: dict = field(default_factory=dict)  # change in inventories: {fy: (opening stock, closing stock)} (rupees)
+    face_line: str = ""       # the line of the statement's face it is part of ("Tax expense"), for the review page
+    face_sign: int = 1        # -1 where the face prints it with the opposite sign (a duty deducted from revenue)
 
 
 @dataclass

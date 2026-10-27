@@ -105,7 +105,7 @@ _FACE_LINES = [
     ("total_income", "Total income", "P&L", r"^total\s*(?:income|revenue)(?!\s*from)"),
     ("total_expenses", "Total expenses", "P&L", r"^total\s*expenses"),
     ("pbt", "Profit before tax", "P&L", r"^(?:net\s*|total\s*)?profit\s*(?:\(loss\)\s*)?before\s*tax"),
-    ("tax", "Tax expense", "P&L", r"^total\s*tax|^tax\s*expense(?!.*discontinu)"),
+    ("tax", "Tax expense", "P&L", r"^total\s*tax|^tax\s*expense(?!.*discon|.*discount)"),
 ]
 
 
@@ -150,6 +150,35 @@ def _bs_totals(extraction, fy):
     return tuple(_face_total(extraction, "BS", r"^total\W*(?:rs\W*)?$", fy, skip=k) for k in (0, 1))
 
 
+def computed_totals(items, fys, result=None):
+    """
+    {fy: the app's own figure for each total a statement prints} -- revenue, total income, total expenses, profit
+    before tax, tax, profit, reserves, total equity and liabilities, total assets -- on the statement's own basis
+    (items printed after 'Total expenses' and after tax kept where the statement has them).
+    """
+    if result is None:
+        result = check(items, fys, 1.0)
+    out = {}
+    for fy in fys:
+        s = result.statements[fy]
+        income_below, expenses_below, tax_below, after_tax = _below_total(items, fy)
+        # deferred tax as printed: an asset and a liability can both appear (the statements net them)
+        dta, dtl = s["sched"]["Deferred Tax Assets"][fy], s["sched"]["Deferred Tax Liabilities"][fy]
+        out[fy] = {
+            "revenue": s["revenue"],
+            "total_income": s["revenue"] + s["other_income"] - income_below,
+            "total_expenses": s["revenue"] - s["operating_pbt"] - expenses_below,
+            # tax of earlier years printed above profit before tax is part of the app's tax expense
+            "pbt": s["operating_pbt"] + s["other_income"] - tax_below - after_tax,
+            "tax": s["tax"] - tax_below,
+            "pat": s["pat"],
+            "reserves": s["reserves"],
+            "total_liab": s["liabilities_side"] + s["current_liabilities"] + dtl,
+            "total_assets": s["total_assets"] - max(s["deferred_tax_net"], 0.0) + dta,
+        }
+    return out
+
+
 def reconcile(extraction, items, fy_columns):
     """
     Compares what the app computed with the figures the input itself prints.
@@ -163,32 +192,20 @@ def reconcile(extraction, items, fy_columns):
     tol = tolerance(extraction.unit_multiplier, extraction.whole_units)
     pat = reported_pat(extraction)
     out = []
+    totals = computed_totals(items, fys, result)
     for fy in fys:
-        s = result.statements[fy]
-        income_below, expenses_below, tax_below, after_tax = _below_total(items, fy)
-        computed = {
-            "revenue": s["revenue"],
-            "total_income": s["revenue"] + s["other_income"] - income_below,
-            "total_expenses": s["revenue"] - s["operating_pbt"] - expenses_below,
-            # tax of earlier years printed above profit before tax is part of the app's tax expense
-            "pbt": s["operating_pbt"] + s["other_income"] - tax_below - after_tax,
-            "tax": s["tax"] - tax_below,
-        }
+        computed = totals[fy]
         for key, label, statement, pattern in _FACE_LINES:
             reported = _face_total(extraction, statement, pattern, fy)
             if reported is not None:
                 out.append(dict(year=fy, line=label, computed=computed[key], reported=reported))
         if fy in pat:
-            out.append(dict(year=fy, line="Profit for the year", computed=s["pat"], reported=pat[fy]))
+            out.append(dict(year=fy, line="Profit for the year", computed=computed["pat"], reported=pat[fy]))
         liab, assets = _bs_totals(extraction, fy)
-        # deferred tax as printed: an asset and a liability can both appear (the statements net them)
-        dta, dtl = s["sched"]["Deferred Tax Assets"][fy], s["sched"]["Deferred Tax Liabilities"][fy]
-        total_liab = s["liabilities_side"] + s["current_liabilities"] + dtl
-        total_assets = s["total_assets"] - max(s["deferred_tax_net"], 0.0) + dta
         if liab is not None:
-            out.append(dict(year=fy, line="Total equity and liabilities", computed=total_liab, reported=liab))
+            out.append(dict(year=fy, line="Total equity and liabilities", computed=computed["total_liab"], reported=liab))
         if assets is not None:
-            out.append(dict(year=fy, line="Total assets", computed=total_assets, reported=assets))
+            out.append(dict(year=fy, line="Total assets", computed=computed["total_assets"], reported=assets))
     for row in out:
         row["diff"] = row["computed"] - row["reported"]
         row["ok"] = abs(row["diff"]) <= tol
